@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -e
+
+ZIP_NAME="speakdo.zip"
+MODULE_PATH="htdocs/speakdo"
+
+echo "Création du package Dolibarr SpeakDo..."
+
+if [ ! -d "$MODULE_PATH" ]; then
+    echo "ERREUR : dossier $MODULE_PATH introuvable."
+    exit 1
+fi
+
+rm -f "$ZIP_NAME"
+
+zip -r "$ZIP_NAME" "$MODULE_PATH" \
+    -x "*/.git/*" \
+       "*/.git" \
+       "*/.github/*" \
+       "*/.github" \
+       "*/.gitignore" \
+       "*/.gitattributes" \
+       "*/.DS_Store"
+
+echo
+echo "Vérification du contenu Git..."
+
+if unzip -l "$ZIP_NAME" | grep -E '/\.git|/\.github|\.gitignore|\.gitattributes'; then
+    echo
+    echo "ERREUR : des fichiers Git sont présents dans le ZIP."
+    rm -f "$ZIP_NAME"
+    exit 1
+fi
+
+echo
+echo "Package créé avec succès : $ZIP_NAME"
+echo
+echo "Début du contenu :"
+unzip -l "$ZIP_NAME" | head -30
