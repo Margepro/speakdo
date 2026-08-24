@@ -28,9 +28,6 @@ $langs->loadLangs(array('admin', 'speakdo@speakdo'));
 if (empty($user->admin)) {
     accessforbidden();
 }
-dol_include_once('/speakdo/core/modules/modSpeakdo.class.php');
-$tmpmodule = new modSpeakDo($db);
-
 
 $action = GETPOST('action', 'aZ09');
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -103,7 +100,7 @@ print dol_get_fiche_head($head, 'settings', $langs->trans('SpeakDoSetup'), -1, "
 
 print '<div class="fichecenter"><div class="fichehalfleft">';
 print '<table class="border centpercent">';
-print '<tr><td class="titlefield">'.$langs->trans('SpeakDoModuleVersion').'</td><td>'.$tmpmodule->version.'</td></tr>';
+print '<tr><td class="titlefield">'.$langs->trans('SpeakDoModuleVersion').'</td><td>0.1.0</td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoProtocolVersion').'</td><td>'.dol_escape_htmltag(getDolGlobalString('SPEAKDO_PROTOCOL_VERSION', '1')).'</td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoRestApi').'</td><td>'.(speakdo_api_is_enabled() ? img_picto('', 'status4').' '.$langs->trans('Enabled') : img_picto('', 'status8').' '.$langs->trans('SpeakDoApiDisabled')).'</td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoHealthEndpoint').'</td><td><code>'.dol_escape_htmltag(DOL_URL_ROOT.'/api/index.php/speakdo/health').'</code></td></tr>';
@@ -126,12 +123,12 @@ print '<tr><td>'.$langs->trans('SpeakDoDisplayName').'</td><td><input class="min
 print '</table><div class="center"><button class="button button-save" type="submit">'.$langs->trans('Save').'</button></div></form>';
 
 print '<div class="tabsAction">';
-// print '<a class="butAction" href="'.dol_buildpath('/speakdo/admin/devices.php', 1).'">'.$langs->trans('SpeakDoOpenDeviceAdmin').'</a> ';
-// print '<a class="butAction" href="'.dol_buildpath('/speakdo/admin/billing.php', 1).'">'.$langs->trans('SpeakDoBilling').'</a> ';
+print '<a class="butAction" href="'.dol_buildpath('/speakdo/admin/devices.php', 1).'">'.$langs->trans('SpeakDoOpenDeviceAdmin').'</a> ';
+print '<a class="butAction" href="'.dol_buildpath('/speakdo/admin/billing.php', 1).'">'.$langs->trans('SpeakDoBilling').'</a> ';
 print '<a class="butAction" target="_blank" rel="noopener" href="'.DOL_URL_ROOT.'/api/index.php/explorer">'.$langs->trans('ApiExplorer').'</a> ';
 print '<form method="post" style="display:inline-block" onsubmit="return confirm(\''.dol_escape_js($langs->trans('SpeakDoConfirmEnroll')).'\');"><input type="hidden" name="token" value="'.dol_escape_htmltag($csrfToken).'"><input type="hidden" name="action" value="enroll"><button type="submit" class="butAction">'.$langs->trans('SpeakDoEnrollNow').'</button></form> ';
-// print '<form method="post" style="display:inline-block" onsubmit="return confirm(\''.dol_escape_js($langs->trans('SpeakDoConfirmReEnroll')).'\');"><input type="hidden" name="token" value="'.dol_escape_htmltag($csrfToken).'"><input type="hidden" name="action" value="reenroll"><button type="submit" class="butActionDelete">'.$langs->trans('SpeakDoReEnrollNow').'</button></form> ';
-// print '<form method="post" style="display:inline-block" onsubmit="return confirm(\''.dol_escape_js($langs->trans('SpeakDoConfirmSecretRotation')).'\');"><input type="hidden" name="token" value="'.dol_escape_htmltag($csrfToken).'"><input type="hidden" name="action" value="rotate"><button type="submit" class="butActionDelete">'.$langs->trans('SpeakDoRotateSecret').'</button></form>';
+print '<form method="post" style="display:inline-block" onsubmit="return confirm(\''.dol_escape_js($langs->trans('SpeakDoConfirmReEnroll')).'\');"><input type="hidden" name="token" value="'.dol_escape_htmltag($csrfToken).'"><input type="hidden" name="action" value="reenroll"><button type="submit" class="butActionDelete">'.$langs->trans('SpeakDoReEnrollNow').'</button></form> ';
+print '<form method="post" style="display:inline-block" onsubmit="return confirm(\''.dol_escape_js($langs->trans('SpeakDoConfirmSecretRotation')).'\');"><input type="hidden" name="token" value="'.dol_escape_htmltag($csrfToken).'"><input type="hidden" name="action" value="rotate"><button type="submit" class="butActionDelete">'.$langs->trans('SpeakDoRotateSecret').'</button></form>';
 print '</div>';
 
 llxFooter();

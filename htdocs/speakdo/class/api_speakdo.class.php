@@ -90,7 +90,7 @@ class Speakdo extends DolibarrApi
         $apiUser = DolibarrApiAccess::$user;
         if (!$apiUser) throw new RestException(401, 'Authentication required');
 
-        $sql = "SELECT public_id, fk_user, label, platform, pwa_version, status, datec, last_seen_at, revoked_at FROM ".MAIN_DB_PREFIX."speakdo_device";
+        $sql = "SELECT public_id, fk_user, label, platform, pwa_version, channel, status, datec, last_seen_at, revoked_at FROM ".MAIN_DB_PREFIX."speakdo_device";
         $sql .= " WHERE entity = ".((int) $conf->entity)." AND public_id = '".$this->db->escape($deviceId)."'";
         $resql = $this->db->query($sql);
         if (!$resql || !($device = $this->db->fetch_object($resql))) throw new RestException(404, 'Device not found');
@@ -102,6 +102,7 @@ class Speakdo extends DolibarrApi
             'label' => $device->label,
             'platform' => $device->platform,
             'pwa_version' => $device->pwa_version,
+            'channel' => $device->channel,
             'status' => $device->status,
             'created_at' => $device->datec,
             'last_seen_at' => $device->last_seen_at,
@@ -177,7 +178,7 @@ class Speakdo extends DolibarrApi
         global $conf;
         $this->assertMiddlewareOrAdmin('');
         $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $terminal_id);
-        $sql = "SELECT d.public_id, d.fk_user, d.label, d.platform, d.status, d.last_seen_at,";
+        $sql = "SELECT d.public_id, d.fk_user, d.label, d.platform, d.channel, d.status, d.last_seen_at,";
         $sql .= " u.login, u.firstname, u.lastname";
         $sql .= " FROM ".MAIN_DB_PREFIX."speakdo_device d";
         $sql .= " INNER JOIN ".MAIN_DB_PREFIX."user u ON u.rowid = d.fk_user";
@@ -192,6 +193,7 @@ class Speakdo extends DolibarrApi
             'status'      => strtolower((string) $device->status),
             'label'       => $device->label,
             'platform'    => $device->platform,
+            'channel'     => $device->channel,
             'user'        => array(
                 'id'    => (int) $device->fk_user,
                 'login' => $device->login,
@@ -199,6 +201,24 @@ class Speakdo extends DolibarrApi
             ),
             'last_seen_at' => $device->last_seen_at,
         );
+    }
+
+    /**
+     * Load user rights with Dolibarr 18+ compatibility.
+     *
+     * Dolibarr <= 19: getrights()
+     * Dolibarr >= 20: loadRights()
+     *
+     * @param User $user
+     * @return void
+     */
+    private function speakdoLoadUserRights($user)
+    {
+        if (method_exists($user, 'loadRights')) {
+            $user->loadRights();
+        } else {
+            $user->getrights();
+        }
     }
 
     /**
@@ -217,7 +237,7 @@ class Speakdo extends DolibarrApi
         if ($targetUser->fetch((int) $user_id) <= 0 || (int) $targetUser->status !== User::STATUS_ENABLED) {
             throw new RestException(404, 'User not found or disabled');
         }
-        $targetUser->loadRights();
+        $this->speakdoLoadUserRights($targetUser);
         return array(
             'ok'                 => true,
             'active'             => true,
@@ -226,6 +246,7 @@ class Speakdo extends DolibarrApi
             'name'               => trim($targetUser->firstname.' '.$targetUser->lastname),
             'is_admin'           => (bool) $targetUser->admin,
             'api_key_configured' => !empty($targetUser->api_key),
+            'mcp_enabled'        => speakdo_user_mcp_enabled($targetUser),
             'capabilities'       => $this->speakdoCapabilitiesForUser($targetUser),
             'permissions_version' => 1,
         );
@@ -411,7 +432,7 @@ class Speakdo extends DolibarrApi
         if ($actingUser->fetch($userId) <= 0 || (int) $actingUser->status !== User::STATUS_ENABLED) {
             throw new RestException(404, 'User not found or disabled');
         }
-        $actingUser->loadRights();
+        $this->speakdoLoadUserRights($actingUser);
         if (!isModEnabled('facture') || !$actingUser->hasRight('facture', 'creer') || !$actingUser->hasRight('ficheinter', 'lire')) {
             throw new RestException(403, 'User is not allowed to create invoices from interventions');
         }
@@ -538,7 +559,7 @@ class Speakdo extends DolibarrApi
         if ($actingUser->fetch($userId) <= 0 || (int) $actingUser->status !== User::STATUS_ENABLED) {
             throw new RestException(404, 'User not found or disabled');
         }
-        $actingUser->loadRights();
+        $this->speakdoLoadUserRights($actingUser);
         if (!isModEnabled($rightModule) || !$actingUser->hasRight($rightModule, 'lire')) {
             throw new RestException(403, 'User is not allowed to read this document');
         }
@@ -678,7 +699,7 @@ class Speakdo extends DolibarrApi
         if ($actingUser->fetch($userId) <= 0 || (int) $actingUser->status !== User::STATUS_ENABLED) {
             throw new RestException(404, 'User not found or disabled');
         }
-        $actingUser->loadRights();
+        $this->speakdoLoadUserRights($actingUser);
 
         $sourceInfo = $typeMap[$sourceType];
         if (!$this->speakdoUserCanReadType($actingUser, $sourceInfo)) {
@@ -907,7 +928,10 @@ class Speakdo extends DolibarrApi
         }
         $this->assertMiddlewareSignature($rawBody);
 
-        // Parse body — middleware sends terminal fields nested under 'terminal'
+        // Parse body — middleware sends terminal fields nested under 'terminal'.
+        // Note: the enrollment channel is intentionally never read from the request body
+        // or URL here. It is fixed once at generation time and resolved below from
+        // llx_speakdo_enrollment.channel, the sole source of truth for this claim.
         $bodyData = json_decode($rawBody, true) ?: array();
         $terminalData = is_array($bodyData['terminal'] ?? null) ? $bodyData['terminal'] : array();
 
@@ -925,7 +949,7 @@ class Speakdo extends DolibarrApi
         $tokenHash = hash('sha256', $token);
         $this->db->begin();
         try {
-            $sql = "SELECT rowid, fk_user, status, expires_at FROM ".MAIN_DB_PREFIX."speakdo_enrollment";
+            $sql = "SELECT rowid, fk_user, channel, status, expires_at FROM ".MAIN_DB_PREFIX."speakdo_enrollment";
             $sql .= " WHERE entity = ".((int) $conf->entity)." AND token_hash = '".$this->db->escape($tokenHash)."' FOR UPDATE";
             $resql = $this->db->query($sql);
             if (!$resql || !($enrollment = $this->db->fetch_object($resql))) {
@@ -937,17 +961,27 @@ class Speakdo extends DolibarrApi
             if ($this->db->jdate($enrollment->expires_at) < dol_now()) {
                 throw new RestException(410, 'Enrollment expired');
             }
+            // Authoritative channel: fixed at generation time, resolved from the stored row only.
+            $channel = in_array($enrollment->channel, array('pwa', 'mcp'), true) ? $enrollment->channel : 'pwa';
             $target = new User($this->db);
             if ($target->fetch((int) $enrollment->fk_user) <= 0 || (int) $target->status !== User::STATUS_ENABLED) {
                 throw new RestException(403, 'Dolibarr user is disabled or unavailable');
             }
+            // One-time re-check at consumption: MCP access may have been turned off after the
+            // QR/token was generated but before it was claimed. This is a creation-time safety
+            // net only — it is not the ongoing authority for MCP access. The middleware is
+            // responsible for checking mcp_enabled (exposed via GET /v1/users/{id}/capabilities)
+            // on every subsequent MCP session/authorization, not just at claim time.
+            if ($channel === 'mcp' && !speakdo_user_mcp_enabled($target)) {
+                throw new RestException(403, 'MCP access is disabled for this user');
+            }
             // Use the terminal_id proposed by the middleware, or generate our own
             $publicId = (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $proposedTerminalId) ? $proposedTerminalId : speakdo_uuid_v4());
-            $sql = "INSERT INTO ".MAIN_DB_PREFIX."speakdo_device(entity, public_id, fk_user, label, platform, pwa_version, public_key, status, datec, last_seen_at) VALUES (";
+            $sql = "INSERT INTO ".MAIN_DB_PREFIX."speakdo_device(entity, public_id, fk_user, label, platform, pwa_version, public_key, channel, status, datec, last_seen_at) VALUES (";
             $sql .= ((int) $conf->entity).", '".$this->db->escape($publicId)."', ".((int) $target->id).", '".$this->db->escape($label)."', ";
             $sql .= ($platform !== '' ? "'".$this->db->escape($platform)."'" : 'NULL').", ";
             $sql .= ($pwa_version !== '' ? "'".$this->db->escape($pwa_version)."'" : 'NULL').", ";
-            $sql .= ($public_key !== '' ? "'".$this->db->escape($public_key)."'" : 'NULL').", 'ACTIVE', '".$this->db->idate(dol_now())."', '".$this->db->idate(dol_now())."')";
+            $sql .= ($public_key !== '' ? "'".$this->db->escape($public_key)."'" : 'NULL').", '".$this->db->escape($channel)."', 'ACTIVE', '".$this->db->idate(dol_now())."', '".$this->db->idate(dol_now())."')";
             if (!$this->db->query($sql)) {
                 throw new RuntimeException($this->db->lasterror());
             }
@@ -959,7 +993,7 @@ class Speakdo extends DolibarrApi
             $displayName = trim($target->firstname.' '.$target->lastname);
             if ($displayName === '') $displayName = $target->login;
             // Compute user capabilities using the SpeakDo capability map
-            $target->loadRights();
+            $this->speakdoLoadUserRights($target);
             $capList = $this->speakdoCapabilitiesForUser($target);
             // Générer une clé API si l'utilisateur n'en a pas encore
             if (empty($target->api_key)) {
@@ -971,6 +1005,7 @@ class Speakdo extends DolibarrApi
                 'valid'           => true,
                 'terminal_id'     => $publicId,
                 'terminal_status' => 'active',
+                'channel'         => $channel,
                 'user'            => array(
                     'id'           => (int) $target->id,
                     'login'        => $target->login,

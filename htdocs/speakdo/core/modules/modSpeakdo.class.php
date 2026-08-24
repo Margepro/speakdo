@@ -42,13 +42,6 @@ class modSpeakdo extends DolibarrModules
         $this->phpmin = array(7, 4);
         $this->need_dolibarr_version = array(18, 0);
         $this->langfiles = array('speakdo@speakdo');
-        
-        		// Author
-		$this->editor_name = 'MargePro';
-		$this->editor_url = 'https://speakdo.fr';		// Must be an external online web site
-		$this->editor_squarred_logo = '';					// Must be image filename into the module/img directory followed with @modulename. Example: 'myimage.png@test'
-        
-        
 
         $this->const = array(
             1 => array('SPEAKDO_APP_ENROLL_URL', 'chaine', 'https://app.speakdo.fr/enroll', 'Base URL used in enrollment QR codes', 1, 'current', 1),
@@ -114,6 +107,33 @@ class modSpeakdo extends DolibarrModules
         if ($result <= 0) {
             return $result;
         }
+
+        require_once DOL_DOCUMENT_ROOT.'/core/class/extrafields.class.php';
+        $extrafields = new ExtraFields($this->db);
+        // Per-user toggle: is this Dolibarr user allowed to enroll/use a SpeakDo MCP client?
+        // Disabled by default for existing and new users (default_value '0'). Not a business
+        // right: it only gates the MCP channel of the existing SpeakDo enrollment/device
+        // mechanism, rendered on our own SpeakDo user tab, so it stays hidden from the
+        // generic extrafields forms (list = '-1').
+        $extrafields->addExtraField(
+            'speakdo_mcp_enabled',
+            'SpeakDoMcpEnabledExtrafield',
+            'boolean',
+            100,
+            '1',
+            'user',
+            0,
+            0,
+            '0',
+            '',
+            0,
+            '',
+            '-1',
+            '',
+            '',
+            '',
+            'speakdo@speakdo'
+        );
 
         require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
         require_once dol_buildpath('/speakdo/lib/speakdo.lib.php', 0);

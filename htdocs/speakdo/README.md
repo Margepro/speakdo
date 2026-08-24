@@ -7,9 +7,10 @@ Version **1.0.0** — compatibilité : Dolibarr 18 à 23, PHP 7.4+ et MariaDB/My
 ## Fonctions
 
 - onglet **SpeakDo** sur chaque fiche utilisateur ;
-- génération d’un QR code éphémère, à usage unique, lié à l’utilisateur ;
+- génération d’un QR code éphémère, à usage unique, lié à l’utilisateur, pour le canal **PWA** ou le canal **MCP** ;
+- bascule **Accès MCP** par utilisateur (désactivée par défaut), indépendante des droits Dolibarr : elle n’autorise qu’un canal d’accès, elle n’accorde aucun droit métier ;
 - création automatique d’une clé API Dolibarr propre à l’utilisateur si elle n’existe pas ;
-- page globale d’administration des périphériques ;
+- page globale d’administration des périphériques, avec le canal (PWA/MCP) affiché pour chacun ;
 - révocation d’un périphérique ;
 - suppression d’un périphérique déjà révoqué ;
 - endpoints REST `speakdo/health`, `speakdo/enrollments/{token}/claim`, `speakdo/devices/{id}` et `touch` ;
@@ -29,10 +30,12 @@ Version **1.0.0** — compatibilité : Dolibarr 18 à 23, PHP 7.4+ et MariaDB/My
 Le QR contient uniquement :
 
 ```text
-https://app.speakdo.example/enroll/<jeton-opaque>
+https://app.speakdo.example/enroll?tenant_id=<uuid>&token=<jeton-opaque>&channel=pwa|mcp
 ```
 
-Il ne contient ni URL Dolibarr ni clé API.
+Il ne contient ni URL Dolibarr ni clé API. Le paramètre `channel` est **informatif** (il permet à la PWA/au middleware de choisir le bon flux avant même d’appeler `claim`) : il n’est jamais lu par Dolibarr lors de la consommation du jeton. La valeur qui fait autorité est celle enregistrée dans `llx_speakdo_enrollment.channel` au moment de la génération du QR, fixée server-side et jamais modifiable ensuite ; toute valeur de canal présente dans l’URL, le corps de requête ou envoyée par le middleware est ignorée par `claim`/`verify`.
+
+Un enrôlement `channel=mcp` ne peut être généré que si l’accès MCP est activé pour l’utilisateur cible (bascule sur sa fiche SpeakDo). Cet état est revérifié une seconde fois, sans effet de bord, au moment de la consommation du jeton (fenêtre du TTL du QR) — ce contrôle ponctuel ne remplace pas une vérification d’autorisation par le middleware à chaque usage MCP réel : c’est au middleware de relire l’état courant via `GET /speakdo/v1/users/{id}/capabilities` (champ `mcp_enabled`) avant d’accorder ou de maintenir un accès MCP.
 
 Le middleware appelle ensuite :
 
@@ -91,3 +94,8 @@ Pour invalider absolument tous les accès d’un utilisateur, il faut également
 - l’approbation différée d’un téléphone enrôlé par un administrateur pour un tiers n’est pas encore implémentée ;
 - les actions métier SpeakDo normalisées seront ajoutées dans une version ultérieure ;
 - la suppression est volontairement autorisée seulement après révocation.
+
+## Dette technique connue (hors périmètre de ce commit)
+
+- `speakdo_ensure_user_api_key()` (déclenché depuis la fiche utilisateur) et `Speakdo::doClaimEnrollment()` (déclenché à la consommation du QR) génèrent la clé API Dolibarr de l’utilisateur par deux chemins différents (`bin2hex(random_bytes(32))` vs `getRandomPassword(false)`). À unifier.
+- `SPEAKDO_BUILT_IN_ADMIN_TOKEN` (`lib/speakdo.lib.php`) est un secret d’auto-enrôlement tenant codé en dur dans le module, identique sur toutes les installations. À remplacer par un secret propre à chaque installation.

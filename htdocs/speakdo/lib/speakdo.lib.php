@@ -34,22 +34,22 @@ function SpeakDoAdminPrepareHead()
 	$h = 0;
 	$head = array();
 
-	$head[$h][0] = dol_buildpath("/speakdo/admin/setup.php", 1);
+	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/setup.php", 1));
 	$head[$h][1] = $langs->trans("Settings");
 	$head[$h][2] = 'settings';
 	$h++;
 
-	$head[$h][0] = dol_buildpath("/speakdo/admin/devices.php", 1);
+	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/devices.php", 1));
 	$head[$h][1] = $langs->trans("Devices");
 	$head[$h][2] = 'devices';
 	$h++;
 
-	$head[$h][0] = dol_buildpath("/speakdo/admin/billing.php", 1);
+	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/billing.php", 1));
 	$head[$h][1] = $langs->trans("Billing");
 	$head[$h][2] = 'billing';
 	$h++;
 	/*
-	$head[$h][0] = dol_buildpath("/speakdo/admin/myobject_extrafields.php", 1);
+	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/myobject_extrafields.php", 1));
 	$head[$h][1] = $langs->trans("ExtraFields");
 	$nbExtrafields = (isset($extrafields->attributes['myobject']['label']) && is_countable($extrafields->attributes['myobject']['label'])) ? count($extrafields->attributes['myobject']['label']) : 0;
 	if ($nbExtrafields > 0) {
@@ -58,7 +58,7 @@ function SpeakDoAdminPrepareHead()
 	$head[$h][2] = 'myobject_extrafields';
 	$h++;
 
-	$head[$h][0] = dol_buildpath("/speakdo/admin/myobjectline_extrafields.php", 1);
+	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/myobjectline_extrafields.php", 1));
 	$head[$h][1] = $langs->trans("ExtraFieldsLines");
 	$nbExtrafields = (isset($extrafields->attributes['myobjectline']['label']) && is_countable($extrafields->attributes['myobjectline']['label'])) ? count($extrafields->attributes['myobject']['label']) : 0;
 	if ($nbExtrafields > 0) {
@@ -68,7 +68,7 @@ function SpeakDoAdminPrepareHead()
 	$h++;
 	*/
 
-	$head[$h][0] = dol_buildpath("/speakdo/admin/about.php", 1);
+	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/about.php", 1));
 	$head[$h][1] = $langs->trans("About");
 	$head[$h][2] = 'about';
 	$h++;
@@ -87,10 +87,14 @@ function SpeakDoAdminPrepareHead()
 
 	return $head;
 }
+
 require_once DOL_DOCUMENT_ROOT.'/user/class/user.class.php';
 
 if (!defined('SPEAKDO_MIDDLEWARE_BASE_URL')) {
     define('SPEAKDO_MIDDLEWARE_BASE_URL', 'https://api.speakdo.fr');
+}
+if (!defined('SPEAKDO_BUILT_IN_ADMIN_TOKEN')) {
+    define('SPEAKDO_BUILT_IN_ADMIN_TOKEN', 'z1l1t-cIy2hbsMlJgbLaS3B2O0vqcb-aTh8PPZM9ZEueOEOs59aEa4A6GzjH_yu_');
 }
 
 
@@ -101,6 +105,11 @@ function speakdo_get_middleware_secret()
         $stored = getDolGlobalString('SPEAKDO_MIDDLEWARE_SECRET'); // backward compat
     }
     return $stored !== '' ? dolDecrypt($stored) : '';
+}
+
+function speakdo_get_admin_token()
+{
+    return SPEAKDO_BUILT_IN_ADMIN_TOKEN;
 }
 
 function speakdo_is_tenant_enrolled()
@@ -119,6 +128,10 @@ function speakdo_enroll_tenant($db, $entity)
     }
 
     $middlewareUrl = SPEAKDO_MIDDLEWARE_BASE_URL;
+    $adminToken = speakdo_get_admin_token();
+    if ($adminToken === '') {
+        throw new RuntimeException('SPEAKDO_ADMIN_TOKEN not configured');
+    }
 
     if (!function_exists('curl_init')) {
         throw new RuntimeException('cURL PHP extension is required for SpeakDo enrollment');
@@ -149,6 +162,7 @@ function speakdo_enroll_tenant($db, $entity)
         CURLOPT_POST           => true,
         CURLOPT_POSTFIELDS     => $body,
         CURLOPT_HTTPHEADER     => array(
+            'X-SpeakDo-Admin-Token: '.$adminToken,
             'Content-Type: application/json',
             'Accept: application/json',
         ),
@@ -220,27 +234,28 @@ function speakdo_ensure_user_api_key($db, User $targetUser)
     return $apiKey;
 }
 
-function speakdo_create_enrollment($db, $entity, $targetUserId, $authorUserId, $ttlSeconds)
+function speakdo_create_enrollment($db, $entity, $targetUserId, $authorUserId, $ttlSeconds, $channel = 'pwa')
 {
+    $channel = in_array($channel, array('pwa', 'mcp'), true) ? $channel : 'pwa';
     $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
     $tokenHash = hash('sha256', $token);
     $now = dol_now();
     $expires = $now + max(60, min(3600, (int) $ttlSeconds));
     $ip = isset($_SERVER['REMOTE_ADDR']) ? substr($_SERVER['REMOTE_ADDR'], 0, 45) : '';
 
-    $sql = "INSERT INTO ".MAIN_DB_PREFIX."speakdo_enrollment(entity, token_hash, fk_user, fk_user_author, status, datec, expires_at, ip_created) VALUES (";
-    $sql .= ((int) $entity).", '".$db->escape($tokenHash)."', ".((int) $targetUserId).", ".((int) $authorUserId).", 'PENDING', '".$db->idate($now)."', '".$db->idate($expires)."', ";
+    $sql = "INSERT INTO ".MAIN_DB_PREFIX."speakdo_enrollment(entity, token_hash, fk_user, fk_user_author, channel, status, datec, expires_at, ip_created) VALUES (";
+    $sql .= ((int) $entity).", '".$db->escape($tokenHash)."', ".((int) $targetUserId).", ".((int) $authorUserId).", '".$db->escape($channel)."', 'PENDING', '".$db->idate($now)."', '".$db->idate($expires)."', ";
     $sql .= ($ip !== '' ? "'".$db->escape($ip)."'" : 'NULL').")";
     if (!$db->query($sql)) {
         throw new RuntimeException($db->lasterror());
     }
 
-    return array('rowid' => $db->last_insert_id(MAIN_DB_PREFIX.'speakdo_enrollment'), 'token' => $token, 'expires_at' => $expires);
+    return array('rowid' => $db->last_insert_id(MAIN_DB_PREFIX.'speakdo_enrollment'), 'token' => $token, 'channel' => $channel, 'expires_at' => $expires);
 }
 
 function speakdo_get_pending_enrollment($db, $entity, $rowid)
 {
-    $sql = "SELECT rowid, fk_user, status, expires_at FROM ".MAIN_DB_PREFIX."speakdo_enrollment";
+    $sql = "SELECT rowid, fk_user, channel, status, expires_at FROM ".MAIN_DB_PREFIX."speakdo_enrollment";
     $sql .= " WHERE rowid = ".((int) $rowid)." AND entity = ".((int) $entity);
     $resql = $db->query($sql);
     if (!$resql) {
@@ -253,15 +268,19 @@ function speakdo_get_pending_enrollment($db, $entity, $rowid)
     return $enrollment;
 }
 
-function speakdo_enrollment_url($token, $tenantId = null)
+function speakdo_enrollment_url($token, $channel = 'pwa', $tenantId = null)
 {
     $base = rtrim(getDolGlobalString('SPEAKDO_APP_ENROLL_URL', 'https://app.speakdo.example/enroll'), '/');
     if ($tenantId === null) {
         $tenantId = getDolGlobalString('SPEAKDO_TENANT_UUID') ?: getDolGlobalString('SPEAKDO_TENANT_ID');
     }
+    // channel is informational only here (it helps the PWA/middleware pick a UI/flow before
+    // calling claim); the authoritative value is always llx_speakdo_enrollment.channel, read
+    // server-side when the token is consumed — see Speakdo::doClaimEnrollment().
     return $base.'?'.http_build_query(array(
         'tenant_id' => $tenantId,
         'token'     => $token,
+        'channel'   => $channel,
     ));
 }
 
@@ -280,7 +299,7 @@ function speakdo_qr_data_uri($payload)
 function speakdo_list_devices($db, $entity, $userId = 0)
 {
     $devices = array();
-    $sql = "SELECT d.rowid, d.public_id, d.fk_user, d.label, d.platform, d.pwa_version, d.status, d.datec, d.last_seen_at, d.revoked_at, u.login, u.firstname, u.lastname";
+    $sql = "SELECT d.rowid, d.public_id, d.fk_user, d.label, d.platform, d.pwa_version, d.channel, d.status, d.datec, d.last_seen_at, d.revoked_at, u.login, u.firstname, u.lastname";
     $sql .= " FROM ".MAIN_DB_PREFIX."speakdo_device d";
     $sql .= " INNER JOIN ".MAIN_DB_PREFIX."user u ON u.rowid = d.fk_user";
     $sql .= " WHERE d.entity = ".((int) $entity);
@@ -332,6 +351,41 @@ function speakdo_api_is_enabled()
 {
     return isModEnabled('api') && getDolGlobalInt('MAIN_MODULE_API') === 1;
 }
+
+/**
+ * Whether this Dolibarr user is allowed to enroll/use a SpeakDo MCP client.
+ * This is a channel activation flag, not a business right: Dolibarr's own
+ * permissions remain the sole authority for what the user can do once
+ * identified. Stored as a 'user' extrafield declared in modSpeakdo::init().
+ *
+ * @param User $targetUser Fetched user object
+ * @return bool
+ */
+function speakdo_user_mcp_enabled(User $targetUser)
+{
+    $targetUser->fetch_optionals();
+    return !empty($targetUser->array_options['options_speakdo_mcp_enabled']);
+}
+
+/**
+ * Enable or disable the MCP channel for this Dolibarr user.
+ *
+ * @param DoliDB $db
+ * @param User   $targetUser Fetched user object
+ * @param bool   $enabled
+ * @return bool The new state
+ */
+function speakdo_set_user_mcp_enabled($db, User $targetUser, $enabled)
+{
+    $targetUser->fetch_optionals();
+    $targetUser->array_options['options_speakdo_mcp_enabled'] = $enabled ? 1 : 0;
+    $result = $targetUser->updateExtraField('speakdo_mcp_enabled');
+    if ($result < 0) {
+        throw new RuntimeException($targetUser->error ?: 'Unable to update SpeakDo MCP flag');
+    }
+    return (bool) $enabled;
+}
+
 /**
  * Sign and send a request to the SpeakDo middleware billing endpoints.
  * These calls always carry an empty body — the canonical string and headers
@@ -403,6 +457,7 @@ function speakdo_middleware_signed_request($method, $path, $userRef = null)
     }
     return $data;
 }
+
 function speakdo_billing_get_status($userRef = null)
 {
     return speakdo_middleware_signed_request('GET', '/billing/status', $userRef);
