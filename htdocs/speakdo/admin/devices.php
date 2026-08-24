@@ -55,9 +55,9 @@ print dol_get_fiche_head($head, 'devices', $langs->trans('SpeakDoSetup'), -1, "t
 
 print '<div class="tabsAction"><a class="butAction" href="'.dol_buildpath('/speakdo/admin/setup.php', 1).'">'.$langs->trans('Setup').'</a></div>';
 print '<div class="div-table-responsive"><table class="liste centpercent">';
-print '<tr class="liste_titre"><th>'.$langs->trans('User').'</th><th>'.$langs->trans('Label').'</th><th>'.$langs->trans('SpeakDoChannel').'</th><th>'.$langs->trans('Platform').'</th><th>'.$langs->trans('Version').'</th><th>'.$langs->trans('DateCreation').'</th><th>'.$langs->trans('LastActivity').'</th><th>'.$langs->trans('Status').'</th><th class="right">'.$langs->trans('Actions').'</th></tr>';
+print '<tr class="liste_titre"><th>'.$langs->trans('User').'</th><th>'.$langs->trans('Label').'</th><th>'.$langs->trans('Platform').'</th><th>'.$langs->trans('Version').'</th><th>'.$langs->trans('DateCreation').'</th><th>'.$langs->trans('LastActivity').'</th><th>'.$langs->trans('Status').'</th><th class="right">'.$langs->trans('Actions').'</th></tr>';
 if (!$devices) {
-    print '<tr><td colspan="9" class="opacitymedium">'.$langs->trans('None').'</td></tr>';
+    print '<tr><td colspan="8" class="opacitymedium">'.$langs->trans('None').'</td></tr>';
 }
 foreach ($devices as $device) {
     $displayName = trim($device->firstname.' '.$device->lastname);
@@ -65,7 +65,6 @@ foreach ($devices as $device) {
     print '<tr class="oddeven">';
     print '<td><a href="'.DOL_URL_ROOT.'/user/card.php?id='.((int) $device->fk_user).'">'.dol_escape_htmltag($displayName).'</a><br><span class="opacitymedium">'.dol_escape_htmltag($device->login).'</span></td>';
     print '<td>'.dol_escape_htmltag($device->label).'<br><span class="opacitymedium">'.dol_escape_htmltag($device->public_id).'</span></td>';
-    print '<td>'.dol_escape_htmltag(strtoupper((string) $device->channel)).'</td>';
     print '<td>'.dol_escape_htmltag((string) $device->platform).'</td>';
     print '<td>'.dol_escape_htmltag((string) $device->pwa_version).'</td>';
     print '<td>'.dol_print_date($db->jdate($device->datec), 'dayhour').'</td>';

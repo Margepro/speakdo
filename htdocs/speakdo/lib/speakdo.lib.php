@@ -387,18 +387,56 @@ function speakdo_set_user_mcp_enabled($db, User $targetUser, $enabled)
 }
 
 /**
- * Sign and send a request to the SpeakDo middleware billing endpoints.
- * These calls always carry an empty body — the canonical string and headers
- * match exactly what DolibarrClient verifies on the middleware side:
- * canonical = METHOD."\n".PATH."\n".TIMESTAMP."\n".NONCE."\n".SHA256('')
- * signature = base64(hmac_sha256(canonical, tenant secret))
- *
- * @param string      $method  HTTP method (GET, POST, ...)
- * @param string      $path    Path only (no domain, no query string), e.g. '/billing/status'
- * @param string|null $userRef Dolibarr user id/ref sent as X-SpeakDo-User-Ref, for logging only
- * @return array Decoded JSON response
+ * Thrown when the SpeakDo middleware answers a signed request with a non-2xx status. When the
+ * response carries the standard contract envelope {"ok":false,"error":{code,message,details,
+ * request_id}} (mcp-provisioning-contract-dolibarr-module.md §5), $errorCode and $details are
+ * populated from it. Calling code must branch on $errorCode — the only stable identifier per the
+ * contract — and never on getMessage(), which carries the middleware's localized, free-form text.
+ * $errorCode is null for transport-level failures (no parseable error envelope).
  */
-function speakdo_middleware_signed_request($method, $path, $userRef = null)
+class SpeakDoMiddlewareApiException extends RuntimeException
+{
+    /** @var int */
+    public $httpCode;
+    /** @var string|null */
+    public $errorCode;
+    /** @var array */
+    public $details;
+
+    public function __construct($httpCode, $errorCode, $message, array $details = array())
+    {
+        parent::__construct($message);
+        $this->httpCode = (int) $httpCode;
+        $this->errorCode = $errorCode;
+        $this->details = $details;
+    }
+}
+
+/**
+ * Sign and send a request to the SpeakDo middleware, reusing the single tenant HMAC mechanism
+ * shared by every module -> middleware call (billing, MCP provisioning, GET /profiles, ...).
+ * Canonical string and header names are fixed by mcp-provisioning-contract-dolibarr-module.md §1,
+ * verified bit-for-bit against that document's example vectors:
+ * canonical = METHOD."\n".PATH."\n".TIMESTAMP."\n".NONCE."\n".SHA256_HEX(BODY)
+ * signature = base64(hmac_sha256(canonical, tenant secret))
+ * PATH never includes the query string (contract §3 example 3), even when $queryParams is used to
+ * build the request URL — only the request URL gets the query string appended, never the signature.
+ *
+ * Backward compatible with the pre-existing billing calls: they pass only ($method, $path,
+ * $userRef), so $body/$extraHeaders/$queryParams default to their previous implicit values
+ * (empty body, no extra headers, no query string) and produce byte-identical requests to before.
+ *
+ * @param string      $method       HTTP method (GET, POST, ...)
+ * @param string      $path         Path only (no domain, no query string), e.g. '/api/v1/mcp/accesses'
+ * @param string|null $userRef      Dolibarr user id/ref sent as X-SpeakDo-User-Ref, for logging only
+ * @param string      $body         Raw request body to sign and send ('' for GET / no-body calls)
+ * @param array       $extraHeaders Extra headers as 'Name' => 'value' (e.g. Idempotency-Key)
+ * @param array       $queryParams  Query params appended to the request URL only (never signed)
+ * @return array Decoded JSON response body (2xx only)
+ * @throws SpeakDoMiddlewareApiException on any non-2xx response
+ * @throws RuntimeException on transport-level failure (tenant not enrolled, no secret, no cURL, unparsable success response)
+ */
+function speakdo_middleware_signed_request($method, $path, $userRef = null, $body = '', array $extraHeaders = array(), array $queryParams = array())
 {
     $tenantId = getDolGlobalString('SPEAKDO_TENANT_UUID') ?: getDolGlobalString('SPEAKDO_TENANT_ID');
     if ($tenantId === '') {
@@ -413,7 +451,7 @@ function speakdo_middleware_signed_request($method, $path, $userRef = null)
     }
 
     $method = strtoupper($method);
-    $rawBody = ''; // billing endpoints always sign an empty body
+    $rawBody = (string) $body;
     $timestamp = (string) time();
     $nonce = rtrim(strtr(base64_encode(random_bytes(24)), '+/', '-_'), '=');
     $canonical = $method."\n".$path."\n".$timestamp."\n".$nonce."\n".hash('sha256', $rawBody);
@@ -429,14 +467,29 @@ function speakdo_middleware_signed_request($method, $path, $userRef = null)
     if ($userRef !== null && $userRef !== '') {
         $headers[] = 'X-SpeakDo-User-Ref: '.$userRef;
     }
+    if ($rawBody !== '') {
+        $headers[] = 'Content-Type: application/json';
+    }
+    foreach ($extraHeaders as $name => $value) {
+        $headers[] = $name.': '.$value;
+    }
 
-    $ch = curl_init(SPEAKDO_MIDDLEWARE_BASE_URL.$path);
-    curl_setopt_array($ch, array(
+    $url = SPEAKDO_MIDDLEWARE_BASE_URL.$path;
+    if (!empty($queryParams)) {
+        $url .= '?'.http_build_query($queryParams);
+    }
+
+    $ch = curl_init($url);
+    $curlOpts = array(
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_CUSTOMREQUEST  => $method,
         CURLOPT_TIMEOUT        => 15,
         CURLOPT_HTTPHEADER     => $headers,
-    ));
+    );
+    if ($rawBody !== '') {
+        $curlOpts[CURLOPT_POSTFIELDS] = $rawBody;
+    }
+    curl_setopt_array($ch, $curlOpts);
     $response  = curl_exec($ch);
     $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curlError = curl_error($ch);
@@ -445,17 +498,200 @@ function speakdo_middleware_signed_request($method, $path, $userRef = null)
     if ($curlError !== '') {
         throw new RuntimeException('SpeakDo middleware request failed: '.$curlError);
     }
-    if ($httpCode < 200 || $httpCode >= 300) {
-        dol_syslog('SpeakDo middleware request failed (HTTP '.$httpCode.') '.$method.' '.$path.' response='.$response, LOG_ERR);
-        $preview = substr((string) $response, 0, 400);
-        throw new RuntimeException('SpeakDo middleware request failed (HTTP '.$httpCode.'): '.($preview !== '' ? $preview : '(empty response body, see dolibarr.log)'));
-    }
 
     $data = json_decode((string) $response, true);
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        dol_syslog('SpeakDo middleware request failed (HTTP '.$httpCode.') '.$method.' '.$path.' response='.$response, LOG_ERR);
+        if (is_array($data) && isset($data['error']) && is_array($data['error'])) {
+            $errCode = isset($data['error']['code']) ? (string) $data['error']['code'] : null;
+            $errMsg = isset($data['error']['message']) ? (string) $data['error']['message'] : ('HTTP '.$httpCode);
+            $errDetails = isset($data['error']['details']) && is_array($data['error']['details']) ? $data['error']['details'] : array();
+            throw new SpeakDoMiddlewareApiException($httpCode, $errCode, $errMsg, $errDetails);
+        }
+        $preview = substr((string) $response, 0, 400);
+        throw new SpeakDoMiddlewareApiException($httpCode, null, 'SpeakDo middleware request failed (HTTP '.$httpCode.'): '.($preview !== '' ? $preview : '(empty response body, see dolibarr.log)'));
+    }
+
     if (!is_array($data)) {
         throw new RuntimeException('SpeakDo middleware: invalid response format');
     }
     return $data;
+}
+
+/**
+ * Client types offered in the "add MCP access" UI, grouped by auth_type. Display/UX catalog only —
+ * the middleware's oauth_clients table remains the sole authority on which OAuth client_type
+ * values actually work (mcp-provisioning-contract-dolibarr-module.md §7); an unlisted or
+ * unrecognized one simply surfaces 'oauth_client_not_registered', handled like any contract error.
+ *
+ * @return array{oauth: array<string,string>, bearer: array<string,string>}
+ */
+function speakdo_mcp_client_catalog()
+{
+    return array(
+        'oauth' => array(
+            'claude'  => 'Claude',
+            'chatgpt' => 'ChatGPT',
+        ),
+        'bearer' => array(
+            'yeastar' => 'Yeastar',
+            'generic' => 'Service externe / automatisation',
+        ),
+    );
+}
+
+/**
+ * Create an MCP access (bearer or oauth) for a Dolibarr user via the middleware's direct
+ * provisioning contract (mcp-provisioning-contract-dolibarr-module.md §2). The caller is
+ * responsible for verifying mcp_enabled and user status beforehand — per contract §9 the
+ * middleware does not re-verify erp_user_id against Dolibarr on this route, it trusts the tenant
+ * HMAC signature as proof the module already checked — and for the Idempotency-Key lifecycle
+ * (§9: stable for a same-intent retry, regenerated after a corrected business error).
+ *
+ * @param int         $erpUserId      Dolibarr user id
+ * @param string      $clientName     1-190 chars, becomes the displayed access name (terminals.display_label)
+ * @param string      $clientType     1-60 chars; for auth_type=oauth must equal a registered oauth_clients.client_id
+ * @param string      $authType       'bearer' or 'oauth'
+ * @param string      $dolibarrApiKey Plaintext Dolibarr API key of $erpUserId
+ * @param string      $idempotencyKey 16-190 chars, [A-Za-z0-9._:-]
+ * @param string|null $terminalStatus 'active' or 'pending_approval', or null for the middleware default ('active')
+ * @return array Decoded response — contract §2 (contains one-shot credentials, capture immediately)
+ */
+function speakdo_mcp_create_access($erpUserId, $clientName, $clientType, $authType, $dolibarrApiKey, $idempotencyKey, $terminalStatus = null)
+{
+    $payload = array(
+        'erp_user_id'     => (int) $erpUserId,
+        'client_name'     => $clientName,
+        'client_type'     => $clientType,
+        'auth_type'       => $authType,
+        'mcp_enabled'     => true,
+        'dolibarr_apikey' => $dolibarrApiKey,
+    );
+    if ($terminalStatus !== null) {
+        $payload['terminal_status'] = $terminalStatus;
+    }
+    $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return speakdo_middleware_signed_request('POST', '/api/v1/mcp/accesses', null, $body, array('Idempotency-Key' => $idempotencyKey));
+}
+
+/**
+ * List MCP accesses for the tenant, optionally filtered by Dolibarr user id (contract §3 — a
+ * convenience filter only, silently ignored if not a pure-digit value, never an authorization
+ * boundary). channel=mcp is implicit server-side; PWA terminals never appear here.
+ *
+ * @param int|null $erpUserId
+ * @return array List of access rows as returned by the middleware (contract §3)
+ */
+function speakdo_mcp_list_accesses($erpUserId = null)
+{
+    $queryParams = array();
+    if ($erpUserId !== null && ctype_digit((string) $erpUserId)) {
+        $queryParams['erp_user_id'] = (string) $erpUserId;
+    }
+    $data = speakdo_middleware_signed_request('GET', '/api/v1/mcp/accesses', null, '', array(), $queryParams);
+    return is_array($data['accesses'] ?? null) ? $data['accesses'] : array();
+}
+
+/**
+ * Revoke a single MCP access by terminal id. Idempotent server-side (contract §4): calling this
+ * again on an already-revoked access still returns 200, never an error — safe to call without a
+ * pre-check.
+ *
+ * @param string $terminalId
+ * @return array {access_id, terminal_id, status:"revoked"}
+ */
+function speakdo_mcp_revoke_access($terminalId)
+{
+    $safeId = preg_replace('/[^0-9a-fA-F-]/', '', (string) $terminalId);
+    return speakdo_middleware_signed_request('POST', '/api/v1/mcp/accesses/'.$safeId.'/revoke', null, '');
+}
+
+/**
+ * Parse the MariaDB DATETIME(6) string returned as last_activity_at (contract §3): format
+ * 'YYYY-MM-DD HH:MM:SS.ffffff', UTC, NOT ISO-8601 (space separator, no 'T', no timezone suffix).
+ *
+ * @param string|null $value
+ * @return int|null Unix timestamp, or null if absent/unparsable
+ */
+function speakdo_mcp_parse_mariadb_datetime($value)
+{
+    if (empty($value)) {
+        return null;
+    }
+    $dt = DateTime::createFromFormat('Y-m-d H:i:s.u', (string) $value, new DateTimeZone('UTC'));
+    if (!$dt) {
+        $dt = DateTime::createFromFormat('Y-m-d H:i:s', (string) $value, new DateTimeZone('UTC'));
+    }
+    return $dt ? $dt->getTimestamp() : null;
+}
+
+/**
+ * UI-only status normalization for an MCP access row. Never alters the contract value itself —
+ * only picks a label/picto for display. For auth_type=bearer the contract's `status` field is the
+ * credential status (issued|active|revoked); for auth_type=oauth it is the terminal status
+ * (pending_approval|active|revoked) — 'issued' and 'active' are both shown as "active" here since
+ * both mean the access is currently usable (contract §3/§8).
+ *
+ * @param Translate $langs
+ * @param string    $status
+ * @return array{0:string,1:string} [label, picto status class]
+ */
+function speakdo_mcp_status_label($langs, $status)
+{
+    switch ($status) {
+        case 'active':
+        case 'issued':
+            return array($langs->trans('SpeakDoMcpStatusActive'), 'status4');
+        case 'pending_approval':
+            return array($langs->trans('SpeakDoMcpStatusPending'), 'status1');
+        case 'revoked':
+            return array($langs->trans('SpeakDoMcpStatusRevoked'), 'status6');
+        default:
+            return array((string) $status, 'status0');
+    }
+}
+
+/**
+ * Map a SpeakDoMiddlewareApiException to a clean, translated message for the Dolibarr admin —
+ * branches on the stable error.code (contract §5), never on the middleware's free-text message,
+ * and never surfaces raw internals/stack traces.
+ *
+ * @param Translate                     $langs
+ * @param SpeakDoMiddlewareApiException $e
+ * @return string
+ */
+function speakdo_mcp_error_message($langs, SpeakDoMiddlewareApiException $e)
+{
+    $map = array(
+        'mcp_not_enabled'                 => 'SpeakDoMcpNotEnabled',
+        'oauth_client_not_registered'     => 'SpeakDoMcpErrOauthUnknown',
+        'mcp_oauth_disabled'              => 'SpeakDoMcpErrOauthDisabled',
+        'missing_erp_credential'          => 'SpeakDoMcpErrMissingCredential',
+        'invalid_mcp_client'              => 'SpeakDoMcpErrInvalidClient',
+        'invalid_mcp_auth_type'           => 'SpeakDoMcpErrInvalidAuthType',
+        'invalid_terminal_status'         => 'SpeakDoMcpErrInvalidClient',
+        'invalid_erp_user_id'             => 'SpeakDoMcpErrInvalidUser',
+        'idempotency_key_required'        => 'SpeakDoMcpErrGeneric',
+        'invalid_idempotency_key'         => 'SpeakDoMcpErrGeneric',
+        'idempotency_conflict'            => 'SpeakDoMcpErrIdempotency',
+        'idempotency_failed_final'        => 'SpeakDoMcpErrIdempotency',
+        'idempotency_in_progress'         => 'SpeakDoMcpErrIdempotencyInProgress',
+        'mcp_access_not_found'            => 'SpeakDoMcpErrAccessNotFound',
+        'invalid_json'                    => 'SpeakDoMcpErrGeneric',
+        'tenant_signature_missing'        => 'SpeakDoMcpErrTenant',
+        'invalid_tenant_timestamp'        => 'SpeakDoMcpErrTenant',
+        'tenant_timestamp_expired'        => 'SpeakDoMcpErrTenant',
+        'invalid_tenant_nonce'            => 'SpeakDoMcpErrTenant',
+        'invalid_tenant_signature'        => 'SpeakDoMcpErrTenant',
+        'tenant_replay_detected'          => 'SpeakDoMcpErrTenant',
+        'oauth_not_configured'            => 'SpeakDoMcpErrMiddlewareConfig',
+        'mcp_provisioning_not_configured' => 'SpeakDoMcpErrMiddlewareConfig',
+    );
+    if ($e->errorCode !== null && isset($map[$e->errorCode])) {
+        return $langs->trans($map[$e->errorCode]);
+    }
+    return $langs->trans('SpeakDoMcpErrGeneric');
 }
 
 function speakdo_billing_get_status($userRef = null)
