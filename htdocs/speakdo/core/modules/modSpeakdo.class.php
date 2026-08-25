@@ -30,6 +30,10 @@ class modSpeakdo extends DolibarrModules
         $this->module_position = '95';
         $this->name = preg_replace('/^mod/i', '', get_class($this));
         $this->description = 'SpeakDo device enrollment and per-user Dolibarr API access';
+        // Author
+		$this->editor_name = 'MargePro';
+		$this->editor_url = 'https://speakdo.fr';
+        
         $this->version = '1.0.0';
         $this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
         $this->picto = 'mobile-alt';
@@ -50,6 +54,7 @@ class modSpeakdo extends DolibarrModules
             4 => array('SPEAKDO_MIDDLEWARE_API_URL', 'chaine', 'https://api.speakdo.fr', 'SpeakDo middleware API base URL', 0, 'current', 1),
             5 => array('SPEAKDO_SLUG', 'chaine', '', 'SpeakDo tenant slug (auto-generated from company name if blank)', 0, 'current', 1),
             6 => array('SPEAKDO_DISPLAY_NAME', 'chaine', '', 'SpeakDo tenant display name (auto-generated from company name if blank)', 0, 'current', 1),
+            7 => array('SPEAKDO_TENANT_BOOTSTRAP_MODE', 'chaine', 'auto', 'Tenant bootstrap protocol: auto (v2, fallback to legacy only if v2 is unsupported), v2 (never fallback) or legacy (old admin-token flow only)', 0, 'current', 1),
         );
 
         $this->tabs = array(
@@ -137,6 +142,11 @@ class modSpeakdo extends DolibarrModules
 
         require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
         require_once dol_buildpath('/speakdo/lib/speakdo.lib.php', 0);
+
+        // Non-secret, never regenerated once set — required by tenant bootstrap v2
+        // (tenant_boostratp.md §1) as soon as SPEAKDO_TENANT_BOOTSTRAP_MODE allows it below.
+        speakdo_ensure_installation_uuid($this->db, $conf->entity);
+
         if (!speakdo_is_tenant_enrolled()) {
             try {
                 speakdo_enroll_tenant($this->db, $conf->entity);

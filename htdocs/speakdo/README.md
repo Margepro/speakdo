@@ -149,8 +149,19 @@ Individuelle, idempotente côté middleware (rappeler sur un accès déjà révo
 - la suppression est volontairement autorisée seulement après révocation ;
 - le catalogue de `client_type` OAuth proposé dans l'UI (Claude, ChatGPT) est indicatif : seul le middleware fait autorité sur les clients réellement enregistrés.
 
+## Enrôlement du tenant (bootstrap)
+
+`speakdo_enroll_tenant($db, $entity)` (appelé à l'activation du module et depuis la page de configuration) est un no-op si le tenant est déjà enrôlé, sinon dispatche selon `SPEAKDO_TENANT_BOOTSTRAP_MODE` (`auto` par défaut, `v2` ou `legacy` — réglable sur la page de configuration) :
+
+- **`v2`** (`speakdo_enroll_tenant_v2()`) — sans secret global : preuve de contrôle de cette instance Dolibarr par challenge/réponse (`POST /api/v1/tenants/bootstrap/start` puis `POST /api/v1/tenants/bootstrap/{id}/finalize`), le middleware vérifiant lui-même la preuve en appelant `GET /api/index.php/speakdo/bootstrap-proofs/{bootstrap_id}` (`Speakdo::bootstrapProof()`, endpoint public, ne révèle que `bootstrap_id`/`challenge`/`installation_id`, jamais de secret). Contrat exact : `tenant_boostratp.md`.
+- **`legacy`** (`speakdo_enroll_tenant_legacy()`, `@deprecated`) — `POST /internal/v1/tenants` authentifié par `X-SpeakDo-Admin-Token`, un secret partagé codé en dur dans le module (`SPEAKDO_BUILT_IN_ADMIN_TOKEN`), identique sur toutes les installations. Conservé uniquement pour les déploiements middleware n'ayant pas encore v2.
+- **`auto`** — tente v2 en premier ; ne bascule sur legacy **que** si le middleware indique explicitement ne pas supporter v2 (réponse 404/501 dont le corps ne correspond à aucune forme du contrat). Toute autre erreur (sécurité, preuve invalide, tenant déjà existant, erreur métier) est remontée telle quelle, sans repli — voir `SpeakDoTenantBootstrapUnsupportedException` dans `lib/speakdo.lib.php`.
+
+Chaque installation génère et conserve un `SPEAKDO_INSTALLATION_UUID` (UUID v4, non secret, jamais régénéré), requis par le bootstrap v2 et visible sur la page de configuration. La validation TLS (`CURLOPT_SSL_VERIFYPEER`/`VERIFYHOST`) est active sur les deux chemins (v2 et legacy) — le chemin legacy la désactivait auparavant sans raison contre un domaine HTTPS public réel.
+
 ## Dette technique connue
 
 - `speakdo_ensure_user_api_key()` (déclenché depuis la fiche utilisateur) et `Speakdo::doClaimEnrollment()` (déclenché à la consommation du QR PWA) génèrent la clé API Dolibarr de l’utilisateur par deux chemins différents (`bin2hex(random_bytes(32))` vs `getRandomPassword(false)`). À unifier.
-- `SPEAKDO_BUILT_IN_ADMIN_TOKEN` (`lib/speakdo.lib.php`) est un secret d’auto-enrôlement tenant codé en dur dans le module, identique sur toutes les installations. À remplacer par un secret propre à chaque installation.
+- `SPEAKDO_BUILT_IN_ADMIN_TOKEN` (`lib/speakdo.lib.php`) reste un secret d'auto-enrôlement tenant codé en dur dans le module, identique sur toutes les installations — utilisé uniquement par `speakdo_enroll_tenant_legacy()`, en repli ou en mode `legacy` explicite.
 - la colonne `channel` sur `llx_speakdo_enrollment`/`llx_speakdo_device` et le paramètre `$channel` de `speakdo_create_enrollment()`/`doClaimEnrollment()` sont désormais vestigiaux (plus jamais alimentés en `mcp` par l'UI). À retirer dans une passe de nettoyage ultérieure si le mécanisme QR-MCP historique est définitivement abandonné.
+- la détection « v2 non supporté » (404/501 sans corps conforme au contrat) est une interprétation de ce module, `tenant_boostratp.md` ne nommant pas explicitement de signal dédié — à confirmer/ajuster si le middleware documente un signal différent.

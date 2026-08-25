@@ -50,6 +50,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($displayNameInput !== '') {
                 dolibarr_set_const($db, 'SPEAKDO_DISPLAY_NAME', $displayNameInput, 'chaine', 0, '', $conf->entity);
             }
+            $bootstrapModeInput = GETPOST('bootstrap_mode', 'aZ09');
+            if (in_array($bootstrapModeInput, array('auto', 'v2', 'legacy'), true)) {
+                dolibarr_set_const($db, 'SPEAKDO_TENANT_BOOTSTRAP_MODE', $bootstrapModeInput, 'chaine', 0, '', $conf->entity);
+            }
             setEventMessages($langs->trans('SetupSaved'), null, 'mesgs');
         }
     } elseif ($action === 'enroll') {
@@ -110,6 +114,8 @@ $isEnrolled = speakdo_is_tenant_enrolled();
 print '<tr><td class="titlefield">'.$langs->trans('SpeakDoTenantEnrollment').'</td><td>'.($isEnrolled ? img_picto('', 'status4').' '.$langs->trans('SpeakDoEnrollmentOk') : img_picto('', 'status8').' '.$langs->trans('SpeakDoNotEnrolled')).'</td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoMiddlewareApiUrl').'</td><td><code>'.dol_escape_htmltag(SPEAKDO_MIDDLEWARE_BASE_URL).'</code></td></tr>';
 print '<tr><td>Tenant UUID</td><td><code>'.dol_escape_htmltag(getDolGlobalString('SPEAKDO_TENANT_UUID', '-')).'</code></td></tr>';
+print '<tr><td>'.$langs->trans('SpeakDoInstallationUuid').'</td><td><code>'.dol_escape_htmltag(getDolGlobalString('SPEAKDO_INSTALLATION_UUID', '-')).'</code></td></tr>';
+print '<tr><td>'.$langs->trans('SpeakDoBootstrapMode').'</td><td>'.dol_escape_htmltag(speakdo_tenant_bootstrap_mode()).'</td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoMiddlewareSecret').'</td><td><input type="password" readonly value="'.dol_escape_htmltag(speakdo_get_middleware_secret()).'" style="width:100%"> <a href="#" onclick="this.previousElementSibling.type=(this.previousElementSibling.type===\'password\'?\'text\':\'password\');return false;">'.$langs->trans('Show').'</a></td></tr>';
 print '</table></div></div><div class="clearboth"></div>';
 
@@ -120,6 +126,12 @@ print '<tr><td class="titlefieldcreate fieldrequired">'.$langs->trans('SpeakDoEn
 print '<tr><td>'.$langs->trans('SpeakDoQrTtl').'</td><td><input type="number" min="60" max="3600" name="qr_ttl" value="'.getDolGlobalInt('SPEAKDO_QR_TTL', 600).'"> '.$langs->trans('Seconds').'</td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoSlug').'</td><td><input class="minwidth500" name="speakdo_slug" value="'.dol_escape_htmltag(getDolGlobalString('SPEAKDO_SLUG')).'"></td></tr>';
 print '<tr><td>'.$langs->trans('SpeakDoDisplayName').'</td><td><input class="minwidth500" name="speakdo_display_name" value="'.dol_escape_htmltag(getDolGlobalString('SPEAKDO_DISPLAY_NAME')).'"></td></tr>';
+$currentBootstrapMode = speakdo_tenant_bootstrap_mode();
+print '<tr><td>'.$langs->trans('SpeakDoBootstrapMode').'</td><td><select name="bootstrap_mode" class="minwidth200">';
+foreach (array('auto' => 'SpeakDoBootstrapModeAuto', 'v2' => 'SpeakDoBootstrapModeV2', 'legacy' => 'SpeakDoBootstrapModeLegacy') as $modeValue => $modeLabelKey) {
+    print '<option value="'.$modeValue.'"'.($currentBootstrapMode === $modeValue ? ' selected' : '').'>'.$langs->trans($modeLabelKey).'</option>';
+}
+print '</select></td></tr>';
 print '</table><div class="center"><button class="button button-save" type="submit">'.$langs->trans('Save').'</button></div></form>';
 
 print '<div class="tabsAction">';

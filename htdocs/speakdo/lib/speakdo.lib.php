@@ -34,22 +34,22 @@ function SpeakDoAdminPrepareHead()
 	$h = 0;
 	$head = array();
 
-	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/setup.php", 1));
+	$head[$h][0] = dol_buildpath("/speakdo/admin/setup.php", 1);
 	$head[$h][1] = $langs->trans("Settings");
 	$head[$h][2] = 'settings';
 	$h++;
 
-	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/devices.php", 1));
+	$head[$h][0] = dol_buildpath("/speakdo/admin/devices.php", 1);
 	$head[$h][1] = $langs->trans("Devices");
 	$head[$h][2] = 'devices';
 	$h++;
 
-	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/billing.php", 1));
+	$head[$h][0] = dol_buildpath("/speakdo/admin/billing.php", 1);
 	$head[$h][1] = $langs->trans("Billing");
 	$head[$h][2] = 'billing';
 	$h++;
 	/*
-	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/myobject_extrafields.php", 1));
+	$head[$h][0] = dol_buildpath("/speakdo/admin/myobject_extrafields.php", 1);
 	$head[$h][1] = $langs->trans("ExtraFields");
 	$nbExtrafields = (isset($extrafields->attributes['myobject']['label']) && is_countable($extrafields->attributes['myobject']['label'])) ? count($extrafields->attributes['myobject']['label']) : 0;
 	if ($nbExtrafields > 0) {
@@ -58,7 +58,7 @@ function SpeakDoAdminPrepareHead()
 	$head[$h][2] = 'myobject_extrafields';
 	$h++;
 
-	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/myobjectline_extrafields.php", 1));
+	$head[$h][0] = dol_buildpath("/speakdo/admin/myobjectline_extrafields.php", 1);
 	$head[$h][1] = $langs->trans("ExtraFieldsLines");
 	$nbExtrafields = (isset($extrafields->attributes['myobjectline']['label']) && is_countable($extrafields->attributes['myobjectline']['label'])) ? count($extrafields->attributes['myobject']['label']) : 0;
 	if ($nbExtrafields > 0) {
@@ -68,7 +68,7 @@ function SpeakDoAdminPrepareHead()
 	$h++;
 	*/
 
-	$head[$h][0] = dolBuildUrl(dol_buildpath("/speakdo/admin/about.php", 1));
+	$head[$h][0] = dol_buildpath("/speakdo/admin/about.php", 1);
 	$head[$h][1] = $langs->trans("About");
 	$head[$h][2] = 'about';
 	$h++;
@@ -107,6 +107,13 @@ function speakdo_get_middleware_secret()
     return $stored !== '' ? dolDecrypt($stored) : '';
 }
 
+/**
+ * @deprecated legacy only. Returns the module-wide shared admin token used solely by
+ * speakdo_enroll_tenant_legacy(). This token is necessarily extractable from any publicly
+ * distributed copy of this module — never use it as a model for new code. Kept only for
+ * backward compatibility with middleware deployments that have not yet enabled bootstrap v2
+ * (tenant_boostratp.md).
+ */
 function speakdo_get_admin_token()
 {
     return SPEAKDO_BUILT_IN_ADMIN_TOKEN;
@@ -121,7 +128,206 @@ function speakdo_is_tenant_enrolled()
     return (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $tenantId);
 }
 
+function speakdo_tenant_bootstrap_mode()
+{
+    $mode = strtolower(trim(getDolGlobalString('SPEAKDO_TENANT_BOOTSTRAP_MODE', 'auto')));
+    return in_array($mode, array('auto', 'v2', 'legacy'), true) ? $mode : 'auto';
+}
+
+/**
+ * Thrown by speakdo_enroll_tenant_v2() specifically when the middleware deployment does not
+ * implement bootstrap v2 at all — the ONLY condition under which speakdo_enroll_tenant() is
+ * allowed to fall back to the legacy path in 'auto' mode (tenant_boostratp.md; never fall back
+ * on a security or business error, only on an explicit version/capability mismatch). Detection
+ * is deliberately conservative — see speakdo_assert_bootstrap_v2_supported().
+ */
+class SpeakDoTenantBootstrapUnsupportedException extends RuntimeException
+{
+}
+
+/**
+ * Distinguishes "this middleware deployment does not implement bootstrap v2 at all" from every
+ * other kind of failure. Only a bare HTTP 404/501 whose body does not even parse as this
+ * contract's JSON shape is treated as unsupported. A response carrying a recognizable
+ * {"bootstrap_id":...} success shape, or a {"error":{"code":...}} envelope — even with an error
+ * code this module version does not know about — is a real answer from a v2-aware middleware and
+ * must NOT trigger a legacy fallback. This specific detection rule is this module's own
+ * interpretation: tenant_boostratp.md does not name an explicit "version unsupported" signal.
+ *
+ * @param int        $httpCode
+ * @param mixed      $decodedBody json_decode() result of the /bootstrap/start response
+ * @throws SpeakDoTenantBootstrapUnsupportedException
+ */
+function speakdo_assert_bootstrap_v2_supported($httpCode, $decodedBody)
+{
+    $looksLikeContractResponse = is_array($decodedBody) && (
+        array_key_exists('bootstrap_id', $decodedBody)
+        || (isset($decodedBody['error']) && is_array($decodedBody['error']) && isset($decodedBody['error']['code']))
+    );
+    if (($httpCode === 404 || $httpCode === 501) && !$looksLikeContractResponse) {
+        throw new SpeakDoTenantBootstrapUnsupportedException('SpeakDo middleware does not support tenant bootstrap v2 (HTTP '.$httpCode.')');
+    }
+}
+
+/**
+ * Enroll this installation's tenant with the SpeakDo middleware. Dispatches according to
+ * SPEAKDO_TENANT_BOOTSTRAP_MODE (tenant_boostratp.md):
+ *  - 'v2': bootstrap v2 only, never falls back to legacy.
+ *  - 'legacy': the old shared-admin-token flow only.
+ *  - 'auto' (default): tries v2 first, falls back to legacy ONLY when the middleware explicitly
+ *    does not support v2 (SpeakDoTenantBootstrapUnsupportedException) — any security, challenge,
+ *    business, or tenant-already-exists error from v2 propagates as-is, no fallback.
+ * A no-op if the tenant is already enrolled (either path).
+ */
 function speakdo_enroll_tenant($db, $entity)
+{
+    if (speakdo_is_tenant_enrolled()) {
+        return getDolGlobalString('SPEAKDO_TENANT_UUID') ?: getDolGlobalString('SPEAKDO_TENANT_ID');
+    }
+
+    $mode = speakdo_tenant_bootstrap_mode();
+    if ($mode === 'legacy') {
+        return speakdo_enroll_tenant_legacy($db, $entity);
+    }
+
+    try {
+        return speakdo_enroll_tenant_v2($db, $entity);
+    } catch (SpeakDoTenantBootstrapUnsupportedException $e) {
+        if ($mode === 'v2') {
+            throw $e; // v2 mode: never fall back, surface the incompatibility as-is.
+        }
+        dol_syslog('SpeakDo: bootstrap v2 unsupported by middleware, falling back to legacy: '.$e->getMessage(), LOG_WARNING);
+        return speakdo_enroll_tenant_legacy($db, $entity);
+    }
+}
+
+/**
+ * Tenant bootstrap v2 (tenant_boostratp.md): no shared global secret. Proves control of this
+ * Dolibarr instance via a challenge that the middleware itself fetches back from
+ * GET /api/index.php/speakdo/bootstrap-proofs/{bootstrap_id} (Speakdo::bootstrapProof()) before
+ * creating the tenant. Stores exactly the same SPEAKDO_TENANT_UUID / SPEAKDO_HMAC_SECRET as the
+ * legacy path on success (tenant_boostratp.md §7 — fields aligned with the legacy response).
+ *
+ * @param DoliDB $db
+ * @param int    $entity
+ * @return string Tenant UUID
+ * @throws SpeakDoTenantBootstrapUnsupportedException if this middleware does not implement v2
+ * @throws RuntimeException on any other failure (security, business, transport)
+ */
+function speakdo_enroll_tenant_v2($db, $entity)
+{
+    $middlewareUrl = SPEAKDO_MIDDLEWARE_BASE_URL;
+    if (!function_exists('curl_init')) {
+        throw new RuntimeException('cURL PHP extension is required for SpeakDo enrollment');
+    }
+    $installationId = speakdo_ensure_installation_uuid($db, $entity);
+
+    // --- 1. start: no secret to present — that's precisely what this flow establishes ---
+    $startBody = json_encode(array(
+        'installation_id'   => $installationId,
+        'dolibarr_base_url' => DOL_MAIN_URL_ROOT,
+    ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    $ch = curl_init($middlewareUrl.'/api/v1/tenants/bootstrap/start');
+    curl_setopt_array($ch, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $startBody,
+        CURLOPT_HTTPHEADER     => array('Content-Type: application/json', 'Accept: application/json'),
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_FOLLOWLOCATION => false,
+    ));
+    $startResp = curl_exec($ch);
+    $startHttp = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $startErr  = curl_error($ch);
+    curl_close($ch);
+
+    if ($startErr !== '') {
+        throw new RuntimeException('SpeakDo bootstrap v2 start failed: '.$startErr);
+    }
+    $startData = json_decode((string) $startResp, true);
+    speakdo_assert_bootstrap_v2_supported($startHttp, $startData);
+
+    if ($startHttp !== 201 || !is_array($startData) || empty($startData['bootstrap_id']) || empty($startData['challenge'])) {
+        $code = (is_array($startData['error'] ?? null)) ? ($startData['error']['code'] ?? null) : null;
+        $msg  = (is_array($startData['error'] ?? null)) ? ($startData['error']['message'] ?? null) : null;
+        dol_syslog('SpeakDo bootstrap v2 start failed (HTTP '.$startHttp.'): '.substr((string) $startResp, 0, 400), LOG_ERR);
+        throw new RuntimeException('SpeakDo bootstrap v2 start failed'.($code ? ' ('.$code.')' : '').($msg ? ': '.$msg : ' (HTTP '.$startHttp.')'));
+    }
+
+    $bootstrapId      = (string) $startData['bootstrap_id'];
+    $challenge        = (string) $startData['challenge'];
+    $expiresInSeconds = isset($startData['expires_in_seconds']) ? (int) $startData['expires_in_seconds'] : 300;
+
+    // --- 2. store locally so our own proof endpoint can answer the middleware's upcoming GET ---
+    $now = dol_now();
+    $expiresAt = $now + max(30, min(3600, $expiresInSeconds));
+    $sql = "INSERT INTO ".MAIN_DB_PREFIX."speakdo_tenant_bootstrap(entity, bootstrap_id, challenge, installation_id, expires_at, datec) VALUES (";
+    $sql .= ((int) $entity).", '".$db->escape($bootstrapId)."', '".$db->escape($challenge)."', '".$db->escape($installationId)."', '".$db->idate($expiresAt)."', '".$db->idate($now)."')";
+    if (!$db->query($sql)) {
+        throw new RuntimeException('SpeakDo bootstrap v2: unable to store challenge locally: '.$db->lasterror());
+    }
+
+    // --- 3. finalize: this call is what triggers the middleware's own outbound GET to our proof
+    // endpoint, from a different request entirely — no deadlock, just a synchronous wait here.
+    try {
+        $ch = curl_init($middlewareUrl.'/api/v1/tenants/bootstrap/'.rawurlencode($bootstrapId).'/finalize');
+        curl_setopt_array($ch, array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => '',
+            CURLOPT_HTTPHEADER     => array('Accept: application/json'),
+            CURLOPT_TIMEOUT        => 30, // must allow time for the middleware's own outbound verification call
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_FOLLOWLOCATION => false,
+        ));
+        $finResp = curl_exec($ch);
+        $finHttp = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $finErr  = curl_error($ch);
+        curl_close($ch);
+
+        if ($finErr !== '') {
+            throw new RuntimeException('SpeakDo bootstrap v2 finalize failed: '.$finErr);
+        }
+        $finData = json_decode((string) $finResp, true);
+
+        if ($finHttp !== 201 || !is_array($finData) || empty($finData['tenant_id']) || empty($finData['dolibarr_hmac_secret'])) {
+            $code = (is_array($finData['error'] ?? null)) ? ($finData['error']['code'] ?? null) : null;
+            $msg  = (is_array($finData['error'] ?? null)) ? ($finData['error']['message'] ?? null) : null;
+            dol_syslog('SpeakDo bootstrap v2 finalize failed (HTTP '.$finHttp.'): '.substr((string) $finResp, 0, 400), LOG_ERR);
+            throw new RuntimeException('SpeakDo bootstrap v2 finalize failed'.($code ? ' ('.$code.')' : '').($msg ? ': '.$msg : ' (HTTP '.$finHttp.')'));
+        }
+
+        $tenantUuid = (string) $finData['tenant_id'];
+        if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $tenantUuid)) {
+            throw new RuntimeException('SpeakDo bootstrap v2: invalid tenant_id in response');
+        }
+
+        require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
+        dolibarr_set_const($db, 'SPEAKDO_TENANT_UUID', $tenantUuid, 'chaine', 0, '', $entity);
+        dolibarr_set_const($db, 'SPEAKDO_HMAC_SECRET', dolEncrypt((string) $finData['dolibarr_hmac_secret']), 'chaine', 0, '', $entity);
+        dolibarr_del_const($db, 'SPEAKDO_TENANT_ID', $entity);
+
+        return $tenantUuid;
+    } finally {
+        // The bootstrap row's only purpose was to answer the middleware's proof GET during this
+        // finalize call; the middleware enforces one-shot consumption on its own side
+        // (tenant_boostratp.md §6), so deleting our local copy afterwards — success or failure —
+        // is hygiene, not a security boundary.
+        $db->query("DELETE FROM ".MAIN_DB_PREFIX."speakdo_tenant_bootstrap WHERE bootstrap_id = '".$db->escape($bootstrapId)."'");
+    }
+}
+
+/**
+ * @deprecated legacy only — see speakdo_get_admin_token(). Original tenant enrollment: a single
+ * shared admin token baked into every copy of this module, authenticating POST /internal/v1/tenants.
+ * Kept only so installations whose middleware deployment has not enabled bootstrap v2 keep working
+ * unchanged; new code must never call this directly — go through speakdo_enroll_tenant().
+ */
+function speakdo_enroll_tenant_legacy($db, $entity)
 {
     if (speakdo_is_tenant_enrolled()) {
         return getDolGlobalString('SPEAKDO_TENANT_UUID') ?: getDolGlobalString('SPEAKDO_TENANT_ID');
@@ -167,8 +373,11 @@ function speakdo_enroll_tenant($db, $entity)
             'Accept: application/json',
         ),
         CURLOPT_TIMEOUT        => 15,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
+        // The admin token below is a bearer credential for a real public HTTPS endpoint — nothing
+        // justifies skipping certificate validation on this call, unlike the self-referential
+        // internal call in Speakdo::proxy() (Dolibarr calling its own local API).
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
     ));
     $response  = curl_exec($ch);
     $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -216,6 +425,29 @@ function speakdo_uuid_v4()
     $data[6] = chr((ord($data[6]) & 0x0f) | 0x40);
     $data[8] = chr((ord($data[8]) & 0x3f) | 0x80);
     return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+}
+
+/**
+ * Generate and persist this installation's non-secret identifier, once. Required groundwork for
+ * a future tenant bootstrap v2 (see tenant_boostratp.md): the middleware-side v2 route does not
+ * exist yet, but every installation must already have a stable installation_id before it can be
+ * used, and it must never be regenerated once set (it identifies this specific Dolibarr instance
+ * across bootstrap attempts, not a credential).
+ *
+ * @param DoliDB $db
+ * @param int    $entity
+ * @return string The installation UUID (existing or newly created)
+ */
+function speakdo_ensure_installation_uuid($db, $entity)
+{
+    $existing = getDolGlobalString('SPEAKDO_INSTALLATION_UUID');
+    if ($existing !== '') {
+        return $existing;
+    }
+    require_once DOL_DOCUMENT_ROOT.'/core/lib/admin.lib.php';
+    $uuid = speakdo_uuid_v4();
+    dolibarr_set_const($db, 'SPEAKDO_INSTALLATION_UUID', $uuid, 'chaine', 0, '', $entity);
+    return $uuid;
 }
 
 function speakdo_ensure_user_api_key($db, User $targetUser)

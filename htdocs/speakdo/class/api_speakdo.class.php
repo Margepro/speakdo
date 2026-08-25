@@ -35,6 +35,39 @@ class Speakdo extends DolibarrApi
     }
 
     /**
+     * Tenant bootstrap v2 proof-of-control endpoint (tenant_boostratp.md §3). Public, no
+     * authentication — the challenge itself, echoed back verbatim, IS the proof; requiring a
+     * secret to read it would be circular. Never reveals anything beyond the three contract
+     * fields, and an expired or unknown bootstrap_id gets the exact same 404 as any other lookup
+     * miss (no distinction leaked, matching how the rest of this class treats not-found cases).
+     *
+     * @url GET /bootstrap-proofs/{bootstrap_id}
+     * @access public
+     *
+     * @param string $bootstrap_id Bootstrap attempt UUID, from the middleware's /bootstrap/start response
+     */
+    public function bootstrapProof($bootstrap_id)
+    {
+        if (!preg_match('/^[0-9a-f-]{36}$/i', (string) $bootstrap_id)) {
+            throw new RestException(404, 'Bootstrap not found');
+        }
+        $sql = "SELECT bootstrap_id, challenge, installation_id, expires_at FROM ".MAIN_DB_PREFIX."speakdo_tenant_bootstrap";
+        $sql .= " WHERE bootstrap_id = '".$this->db->escape($bootstrap_id)."'";
+        $resql = $this->db->query($sql);
+        if (!$resql || !($row = $this->db->fetch_object($resql))) {
+            throw new RestException(404, 'Bootstrap not found');
+        }
+        if ($this->db->jdate($row->expires_at) < dol_now()) {
+            throw new RestException(404, 'Bootstrap not found');
+        }
+        return array(
+            'bootstrap_id'    => $row->bootstrap_id,
+            'challenge'       => $row->challenge,
+            'installation_id' => $row->installation_id,
+        );
+    }
+
+    /**
      * Public health check. No secret is returned.
      *
      * @url GET /health
