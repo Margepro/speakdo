@@ -69,6 +69,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'set_mcp') {
             speakdo_set_user_mcp_enabled($db, $object, GETPOSTINT('mcp_enabled') === 1);
             setEventMessages($langs->trans('SetupSaved'), null, 'mesgs');
+        } elseif ($action === 'set_profile') {
+            $profileValue = trim(GETPOST('speakdo_profile', 'alphanohtml'));
+            // Mission §8: once the catalog is reachable, no longer accept an arbitrary id blindly
+            // — check membership. Format-only validation (speakdo_set_user_profile()) still
+            // applies either way; a catalog outage does not block profile assignment.
+            if ($profileValue !== '') {
+                try {
+                    $knownIds = array_column(speakdo_profiles_get(), 'id');
+                    if (!in_array($profileValue, $knownIds, true)) {
+                        throw new RuntimeException($langs->trans('SpeakDoProfileUnknown'));
+                    }
+                } catch (SpeakDoMiddlewareApiException $ignored) {
+                    // Catalog unreachable: keep the format-only validation done by speakdo_set_user_profile().
+                }
+            }
+            speakdo_set_user_profile($db, $object, $profileValue);
+            setEventMessages($langs->trans('SetupSaved'), null, 'mesgs');
         } elseif ($action === 'revoke') {
             speakdo_revoke_device($db, $conf->entity, GETPOSTINT('device_id'), $user->id, $object->id);
             setEventMessages($langs->trans('SpeakDoDeviceRevoked'), null, 'mesgs');
@@ -153,6 +170,13 @@ if ($qr === null && !empty($_SESSION['speakdo_qr'][$object->id])) {
 }
 
 $mcpEnabled = speakdo_user_mcp_enabled($object);
+$speakdoProfile = speakdo_user_profile($object);
+$speakdoProfileCatalog = null;
+try {
+    $speakdoProfileCatalog = speakdo_profiles_get();
+} catch (Throwable $e) {
+    $speakdoProfileCatalog = null;
+}
 
 $devices = array();
 try {
@@ -191,6 +215,24 @@ print '<input type="hidden" name="id" value="'.((int) $object->id).'">';
 print '<input type="hidden" name="action" value="set_mcp">';
 print '<label><input type="checkbox" name="mcp_enabled" value="1"'.($mcpEnabled ? ' checked' : '').' onchange="this.form.submit()"> '.$langs->trans('SpeakDoMcpAllowCheckbox').'</label>';
 print '</form>';
+print '</td></tr>';
+print '<tr><td>'.$langs->trans('SpeakDoProfile').'</td><td>';
+print '<form method="post" style="display:inline">';
+print '<input type="hidden" name="token" value="'.dol_escape_htmltag($csrfToken).'">';
+print '<input type="hidden" name="id" value="'.((int) $object->id).'">';
+print '<input type="hidden" name="action" value="set_profile">';
+if ($speakdoProfileCatalog !== null) {
+    print '<select name="speakdo_profile" class="minwidth300">';
+    print speakdo_profile_select_options($speakdoProfileCatalog, $speakdoProfile, $langs->trans('SpeakDoProfileTenantDefault'), $langs);
+    print '</select> ';
+} else {
+    print '<input type="text" name="speakdo_profile" class="minwidth200" maxlength="190" placeholder="'.dol_escape_htmltag($langs->trans('SpeakDoProfileDefaultPlaceholder')).'" value="'.dol_escape_htmltag($speakdoProfile).'"> ';
+}
+print '<button class="button small" type="submit">'.$langs->trans('Save').'</button>';
+print '</form>';
+if ($speakdoProfileCatalog === null) {
+    print '<p class="opacitymedium marginleftonlyshort" style="margin-top:3px">'.$langs->trans('SpeakDoProfileCatalogUnavailableHint').'</p>';
+}
 print '</td></tr>';
 print '</table>';
 

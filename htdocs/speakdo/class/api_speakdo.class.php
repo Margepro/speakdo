@@ -271,7 +271,12 @@ class Speakdo extends DolibarrApi
             throw new RestException(404, 'User not found or disabled');
         }
         $this->speakdoLoadUserRights($targetUser);
-        return array(
+        // Effective SpeakDo profile propagated to the middleware (McpAuthService reads
+        // profile_id/profile_version/profile_scope/profile_missing_modules from this response to
+        // select the MCP tool catalog and enforcement policy). profile_id is always present —
+        // never omitted, so an absent field can never be mistaken for a deliberate 'generic'.
+        $profileContext = speakdo_profile_context($targetUser);
+        $response = array(
             'ok'                 => true,
             'active'             => true,
             'user_id'            => (int) $targetUser->id,
@@ -280,9 +285,20 @@ class Speakdo extends DolibarrApi
             'is_admin'           => (bool) $targetUser->admin,
             'api_key_configured' => !empty($targetUser->api_key),
             'mcp_enabled'        => speakdo_user_mcp_enabled($targetUser),
+            'profile_id'         => $profileContext['profile_id'],
             'capabilities'       => $this->speakdoCapabilitiesForUser($targetUser),
             'permissions_version' => 1,
         );
+        if (isset($profileContext['profile_version'])) {
+            $response['profile_version'] = $profileContext['profile_version'];
+        }
+        if (isset($profileContext['profile_scope'])) {
+            $response['profile_scope'] = $profileContext['profile_scope'];
+        }
+        if (isset($profileContext['profile_missing_modules'])) {
+            $response['profile_missing_modules'] = $profileContext['profile_missing_modules'];
+        }
+        return $response;
     }
 
     /**

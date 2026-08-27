@@ -48,6 +48,11 @@ function SpeakDoAdminPrepareHead()
 	$head[$h][1] = $langs->trans("Billing");
 	$head[$h][2] = 'billing';
 	$h++;
+
+	$head[$h][0] = dol_buildpath("/speakdo/admin/personalization.php", 1);
+	$head[$h][1] = $langs->trans("SpeakDoPersonalization");
+	$head[$h][2] = 'personalization';
+	$h++;
 	/*
 	$head[$h][0] = dol_buildpath("/speakdo/admin/myobject_extrafields.php", 1);
 	$head[$h][1] = $langs->trans("ExtraFields");
@@ -619,6 +624,151 @@ function speakdo_set_user_mcp_enabled($db, User $targetUser, $enabled)
 }
 
 /**
+ * Regex a SpeakDo profile identifier must match: a stable machine id like 'project_manager' or
+ * 'field.it_support.v1', never a translated label. Shape validation only (UX-level) — the
+ * middleware remains the sole authority on which ids actually exist once that contract lands.
+ */
+const SPEAKDO_PROFILE_ID_REGEX = '/^[a-z0-9_.]{1,190}$/i';
+
+/**
+ * The Dolibarr user's assigned SpeakDo profile identifier, or '' if unset (meaning: inherits the
+ * tenant default profile, itself falling back to the middleware's own 'generic' — this module
+ * never resolves or assumes a specific default value itself). A preference, not a permission:
+ * see speakdo_set_user_mcp_enabled() for the equivalent reasoning. Stored as a 'user' extrafield
+ * declared in modSpeakdo::init().
+ *
+ * @param User $targetUser Fetched user object
+ * @return string
+ */
+function speakdo_user_profile(User $targetUser)
+{
+    $targetUser->fetch_optionals();
+    return (string) ($targetUser->array_options['options_speakdo_profile'] ?? '');
+}
+
+/**
+ * Assign (or clear, with '') a SpeakDo profile identifier to this Dolibarr user. Only validates
+ * the identifier's shape (see SPEAKDO_PROFILE_ID_REGEX) — this module has no catalog of real
+ * profile ids to validate against yet (the GET /api/v1/profiles-equivalent middleware contract
+ * does not exist here), so this can accept an id that turns out not to exist middleware-side;
+ * that is a resolution concern for whoever consumes the assignment later, not this function.
+ *
+ * @param DoliDB $db
+ * @param User   $targetUser Fetched user object
+ * @param string $profileId
+ * @return string The stored value
+ */
+function speakdo_set_user_profile($db, User $targetUser, $profileId)
+{
+    $profileId = trim((string) $profileId);
+    if ($profileId !== '' && !preg_match(SPEAKDO_PROFILE_ID_REGEX, $profileId)) {
+        throw new RuntimeException('Invalid SpeakDo profile identifier');
+    }
+    $targetUser->fetch_optionals();
+    $targetUser->array_options['options_speakdo_profile'] = $profileId;
+    $result = $targetUser->updateExtraField('speakdo_profile');
+    if ($result < 0) {
+        throw new RuntimeException($targetUser->error ?: 'Unable to update SpeakDo profile');
+    }
+    return $profileId;
+}
+
+/**
+ * The user's effective SpeakDo profile identifier — never empty. Resolves, in order: the user's
+ * own assignment (speakdo_user_profile()), then the tenant default (SPEAKDO_DEFAULT_PROFILE),
+ * then the hardcoded fallback 'generic'. This is the single resolution order already used to
+ * display the "(profil par défaut du tenant)"/"(generic)" placeholders in user.php and
+ * admin/personalization.php; it is centralized here so no caller has to reimplement it.
+ *
+ * @param User $targetUser Fetched user object
+ * @return string Never ''
+ */
+function speakdo_user_effective_profile(User $targetUser)
+{
+    $profileId = speakdo_user_profile($targetUser);
+    if ($profileId !== '') {
+        return $profileId;
+    }
+    $tenantDefault = trim((string) getDolGlobalString('SPEAKDO_DEFAULT_PROFILE'));
+    if ($tenantDefault !== '') {
+        return $tenantDefault;
+    }
+    return 'generic';
+}
+
+/**
+ * Full SpeakDo profile context for a user, as consumed by McpAuthService: the user's effective
+ * profile id (see speakdo_user_effective_profile(), always present) plus, best-effort, the
+ * version/scope/missing-modules info carried by the tenant's live profile catalog
+ * (speakdo_profiles_get(), GET /profiles). The catalog lookup is best-effort only: if the
+ * middleware is unreachable, or the effective profile id is not (or no longer) listed in the
+ * catalog, only 'profile_id' is returned — never an error, since an incomplete profile context
+ * must not block MCP authentication, and never a guessed version/scope for data we cannot verify.
+ *
+ * 'profile_scope' is derived here, not supplied by the middleware: 'full' when every module the
+ * catalog's requires.required.all_of lists is enabled and at least one of requires.required.any_of
+ * (if any) is enabled too; 'restricted' otherwise. 'profile_missing_modules' lists exactly the
+ * required module keys causing that 'restricted' scope (empty when scope is 'full').
+ *
+ * @param User $targetUser Fetched user object
+ * @return array{profile_id:string, profile_version?:int, profile_scope?:string, profile_missing_modules?:list<string>}
+ */
+function speakdo_profile_context(User $targetUser)
+{
+    $context = array('profile_id' => speakdo_user_effective_profile($targetUser));
+
+    try {
+        $catalog = speakdo_profiles_get();
+    } catch (Throwable $e) {
+        return $context; // middleware unreachable: profile_id alone, no guessed extras
+    }
+
+    $entry = null;
+    foreach ($catalog as $p) {
+        if ((string) ($p['id'] ?? '') === $context['profile_id']) {
+            $entry = $p;
+            break;
+        }
+    }
+    if ($entry === null) {
+        return $context; // effective profile id not (or no longer) in the catalog
+    }
+
+    if (isset($entry['version'])) {
+        $context['profile_version'] = (int) $entry['version'];
+    }
+
+    $requiredAllOf = is_array($entry['requires']['required']['all_of'] ?? null) ? $entry['requires']['required']['all_of'] : array();
+    $requiredAnyOf = is_array($entry['requires']['required']['any_of'] ?? null) ? $entry['requires']['required']['any_of'] : array();
+
+    $missing = array();
+    foreach ($requiredAllOf as $mod) {
+        if (!isModEnabled((string) $mod)) {
+            $missing[] = (string) $mod;
+        }
+    }
+    if (!empty($requiredAnyOf)) {
+        $anySatisfied = false;
+        foreach ($requiredAnyOf as $mod) {
+            if (isModEnabled((string) $mod)) {
+                $anySatisfied = true;
+                break;
+            }
+        }
+        if (!$anySatisfied) {
+            foreach ($requiredAnyOf as $mod) {
+                $missing[] = (string) $mod;
+            }
+        }
+    }
+
+    $context['profile_missing_modules'] = $missing;
+    $context['profile_scope'] = empty($missing) ? 'full' : 'restricted';
+
+    return $context;
+}
+
+/**
  * Thrown when the SpeakDo middleware answers a signed request with a non-2xx status. When the
  * response carries the standard contract envelope {"ok":false,"error":{code,message,details,
  * request_id}} (mcp-provisioning-contract-dolibarr-module.md §5), $errorCode and $details are
@@ -919,6 +1069,240 @@ function speakdo_mcp_error_message($langs, SpeakDoMiddlewareApiException $e)
         'tenant_replay_detected'          => 'SpeakDoMcpErrTenant',
         'oauth_not_configured'            => 'SpeakDoMcpErrMiddlewareConfig',
         'mcp_provisioning_not_configured' => 'SpeakDoMcpErrMiddlewareConfig',
+    );
+    if ($e->errorCode !== null && isset($map[$e->errorCode])) {
+        return $langs->trans($map[$e->errorCode]);
+    }
+    return $langs->trans('SpeakDoMcpErrGeneric');
+}
+
+/**
+ * Fetch the tenant's SpeakDo profile catalog (api.md, cited alongside semantic-policy as sharing
+ * its HMAC auth — confirmed live at GET /profiles, not under /api/v1). Each entry has at least
+ * 'id' (stable machine identifier) and 'label' (human-readable); 'requires'/'enhanced_by' describe
+ * which Dolibarr modules the profile needs/benefits from and are for informational display only
+ * (mission's §25-equivalent) — this module does not compute or enforce capability resolution
+ * itself, that stays the middleware's job.
+ *
+ * @return array List of profile rows as returned by the middleware
+ */
+function speakdo_profiles_get()
+{
+    $data = speakdo_middleware_signed_request('GET', '/profiles', null);
+    return is_array($data['profiles'] ?? null) ? $data['profiles'] : array();
+}
+
+/**
+ * Build <option> tags for a profile <select>, from a speakdo_profiles_get() catalog. Always keeps
+ * the currently assigned value selectable even if the catalog no longer lists it (mission: "ne
+ * pas silencieusement modifier la configuration" for a profile that has disappeared). Shared by
+ * user.php (per-user select) and admin/personalization.php (per-user table + tenant default).
+ *
+ * @param array     $profiles     speakdo_profiles_get() result
+ * @param string    $currentValue
+ * @param string    $emptyLabel   Label for the '' (inherit) option
+ * @param Translate $langs
+ * @return string
+ */
+function speakdo_profile_select_options(array $profiles, $currentValue, $emptyLabel, $langs)
+{
+    $html = '<option value=""'.($currentValue === '' ? ' selected' : '').'>'.dol_escape_htmltag($emptyLabel).'</option>';
+    $seen = false;
+    foreach ($profiles as $p) {
+        $id = (string) ($p['id'] ?? '');
+        if ($id === '') continue;
+        if ($id === $currentValue) $seen = true;
+        $label = (string) ($p['label'] ?? $id);
+        $html .= '<option value="'.dol_escape_htmltag($id).'"'.($currentValue === $id ? ' selected' : '').'>'.dol_escape_htmltag($label).' ('.dol_escape_htmltag($id).')</option>';
+    }
+    if ($currentValue !== '' && !$seen) {
+        $html .= '<option value="'.dol_escape_htmltag($currentValue).'" selected>'.dol_escape_htmltag($currentValue).' — '.dol_escape_htmltag($langs->trans('SpeakDoProfileNotInCatalog')).'</option>';
+    }
+    return $html;
+}
+
+/**
+ * Fetch the tenant's active semantic policy (api.md §3 quater). A tenant with no customization
+ * gets {revision: 0, policy: <empty-but-valid policy>} — not an error.
+ *
+ * @return array {ok, revision, policy: {schema_version, actions:{exclude,priority}, lexicon:[], ui:{shortcuts:[]}}}
+ */
+function speakdo_semantic_policy_get()
+{
+    return speakdo_middleware_signed_request('GET', '/semantic-policy', null);
+}
+
+/**
+ * Fetch the closed catalog of SpeakDo actions a semantic policy's intent_alias entries may
+ * reference (api.md §3 quater). Not a permission decision — capabilities are re-verified live at
+ * execution time regardless of what this catalog lists.
+ *
+ * @return array List of {id, version, description, read_only, requires_confirmation, input_schema}
+ */
+function speakdo_semantic_actions_get()
+{
+    $data = speakdo_middleware_signed_request('GET', '/semantic-actions', null);
+    return is_array($data['actions'] ?? null) ? $data['actions'] : array();
+}
+
+/**
+ * Publish a new semantic policy revision (api.md §3 quater). $expectedRevision must be the
+ * revision this policy was read from — a stale value is rejected with
+ * 409 semantic_policy_revision_conflict (never silently overwritten; see
+ * speakdo_semantic_error_message()). $policy must contain only the two admitted lexicon entry
+ * types (lexical_alias, intent_alias); any unknown key, URL, control character, HTML, or unknown
+ * action is rejected by the middleware with 422 invalid_semantic_policy — this module does not
+ * attempt to replicate that validation beyond basic UX-level checks (see
+ * admin/personalization.php), the middleware remains the sole authority.
+ *
+ * @param int    $expectedRevision
+ * @param array  $policy           {schema_version, actions, lexicon, ui} — the full policy object
+ * @param string $reason           Optional free-text audit note (not part of the policy itself)
+ * @return array Middleware response (at least 'revision' on success)
+ */
+function speakdo_semantic_policy_put($expectedRevision, array $policy, $reason = '')
+{
+    $body = json_encode(array(
+        'expected_revision' => (int) $expectedRevision,
+        'reason'            => (string) $reason,
+        'policy'            => $policy,
+    ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return speakdo_middleware_signed_request('PUT', '/semantic-policy', null, $body);
+}
+
+/**
+ * Validate and build one lexicon entry (api.md §3 quater: only {type, locale, expression,
+ * canonical, preferred_action?} are admitted — any other key is rejected middleware-side with
+ * 422 invalid_semantic_policy). UX-level checks only (length, no HTML/URL/control chars, known
+ * action id); the middleware remains the sole real authority.
+ *
+ * @param string    $type            'lexical_alias' or 'intent_alias' (anything else -> lexical_alias)
+ * @param string    $expression
+ * @param string    $canonical
+ * @param string    $preferredAction Required and validated against $knownActionIds for intent_alias, ignored otherwise
+ * @param string    $locale          e.g. 'fr'
+ * @param string[]  $knownActionIds  From speakdo_semantic_actions_get()
+ * @param Translate $langs
+ * @return array The validated entry, ready to insert into policy.lexicon
+ * @throws RuntimeException on any UX-level validation failure
+ */
+function speakdo_semantic_lexicon_validate_entry($type, $expression, $canonical, $preferredAction, array $knownActionIds, $locale, $langs)
+{
+    $type = ($type === 'intent_alias') ? 'intent_alias' : 'lexical_alias';
+    $expression = trim((string) $expression);
+    $canonical = trim((string) $canonical);
+    $preferredAction = trim((string) $preferredAction);
+
+    if ($expression === '' || $canonical === '') {
+        throw new RuntimeException($langs->trans('SpeakDoVocabFieldsRequired'));
+    }
+    if (mb_strlen($expression) > 190 || mb_strlen($canonical) > 190) {
+        throw new RuntimeException($langs->trans('SpeakDoVocabTooLong'));
+    }
+    if (preg_match('/[<>]/', $expression.$canonical) || preg_match('#https?://#i', $expression.$canonical) || preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', $expression.$canonical)) {
+        throw new RuntimeException($langs->trans('SpeakDoVocabInvalidContent'));
+    }
+
+    $entry = array(
+        'type'       => $type,
+        'locale'     => (string) $locale,
+        'expression' => $expression,
+        'canonical'  => $canonical,
+    );
+    if ($type === 'intent_alias') {
+        if ($preferredAction === '') {
+            throw new RuntimeException($langs->trans('SpeakDoVocabActionRequired'));
+        }
+        if (!in_array($preferredAction, $knownActionIds, true)) {
+            throw new RuntimeException($langs->trans('SpeakDoVocabActionUnknown'));
+        }
+        $entry['preferred_action'] = $preferredAction;
+    }
+    return $entry;
+}
+
+/**
+ * Identity key for a lexicon entry: (type, expression) case-insensitively — the contract gives
+ * entries no numeric id, so this is the natural, sound key (two entries sharing it would be
+ * ambiguous to the middleware's own resolver too).
+ */
+function speakdo_semantic_lexicon_key(array $entry)
+{
+    return mb_strtolower(($entry['type'] ?? '').'|'.($entry['expression'] ?? ''));
+}
+
+/**
+ * Insert or replace (by speakdo_semantic_lexicon_key()) one entry in a lexicon array.
+ *
+ * @param array $lexicon
+ * @param array $newEntry
+ * @return array{lexicon: array, updated: bool} updated=true if an existing entry was replaced
+ */
+function speakdo_semantic_lexicon_upsert(array $lexicon, array $newEntry)
+{
+    $key = speakdo_semantic_lexicon_key($newEntry);
+    $updated = false;
+    foreach ($lexicon as $i => $entry) {
+        if (speakdo_semantic_lexicon_key($entry) === $key) {
+            $lexicon[$i] = $newEntry;
+            $updated = true;
+            break;
+        }
+    }
+    if (!$updated) {
+        $lexicon[] = $newEntry;
+    }
+    return array('lexicon' => array_values($lexicon), 'updated' => $updated);
+}
+
+/**
+ * Remove one entry (by type+expression) from a lexicon array. A no-op if not found.
+ *
+ * @param array  $lexicon
+ * @param string $type
+ * @param string $expression
+ * @return array The resulting lexicon
+ */
+function speakdo_semantic_lexicon_remove(array $lexicon, $type, $expression)
+{
+    $key = mb_strtolower($type.'|'.$expression);
+    foreach ($lexicon as $i => $entry) {
+        if (speakdo_semantic_lexicon_key($entry) === $key) {
+            array_splice($lexicon, $i, 1);
+            break;
+        }
+    }
+    return array_values($lexicon);
+}
+
+/**
+ * Map a SpeakDoMiddlewareApiException from a /profiles, /semantic-policy or /semantic-actions
+ * call to a clean message for the Dolibarr admin. Mirrors speakdo_mcp_error_message()'s
+ * code-not-message discipline for every code EXCEPT invalid_semantic_policy: that code's cause
+ * varies per submission (which field, which value) and the middleware's own message is the only
+ * actionable detail available — surfacing it here is what this mission's §7 explicitly asks for
+ * ("afficher l'erreur exploitable du middleware"), unlike every other error code in this module
+ * which is deliberately shown as a fixed, translated, code-driven message instead.
+ *
+ * @param Translate                     $langs
+ * @param SpeakDoMiddlewareApiException $e
+ * @return string
+ */
+function speakdo_semantic_error_message($langs, SpeakDoMiddlewareApiException $e)
+{
+    if ($e->errorCode === 'invalid_semantic_policy') {
+        $detail = trim((string) $e->getMessage());
+        return $detail !== '' ? $langs->trans('SpeakDoSemanticErrInvalidPolicyPrefix').' '.$detail : $langs->trans('SpeakDoSemanticErrInvalidPolicy');
+    }
+    $map = array(
+        'semantic_policy_revision_conflict' => 'SpeakDoSemanticErrRevisionConflict',
+        'tenant_signature_missing'          => 'SpeakDoMcpErrTenant',
+        'invalid_tenant_timestamp'          => 'SpeakDoMcpErrTenant',
+        'tenant_timestamp_expired'          => 'SpeakDoMcpErrTenant',
+        'invalid_tenant_nonce'              => 'SpeakDoMcpErrTenant',
+        'invalid_tenant_signature'          => 'SpeakDoMcpErrTenant',
+        'tenant_replay_detected'            => 'SpeakDoMcpErrTenant',
+        'internal_error'                    => 'SpeakDoMcpErrGeneric',
     );
     if ($e->errorCode !== null && isset($map[$e->errorCode])) {
         return $langs->trans($map[$e->errorCode]);

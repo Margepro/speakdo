@@ -142,6 +142,46 @@ Interrogée en direct à chaque affichage de la fiche utilisateur (aucune donné
 
 Individuelle, idempotente côté middleware (rappeler sur un accès déjà révoqué renvoie de nouveau `200`, jamais d'erreur). Révoquer un accès MCP n'affecte ni les autres accès MCP de l'utilisateur, ni son terminal PWA.
 
+## Profils métier — propagation au middleware
+
+Le profil SpeakDo assigné à un utilisateur (`speakdo_user_profile()`, extrafield `speakdo_profile`,
+administré depuis la fiche utilisateur et `admin/personalization.php`) doit être explicitement
+transmis au middleware : c'est lui qui restreint le catalogue d'outils MCP (`ProfileCatalog`) et
+l'enforcement (`ActionService::assertProfileAllows()`) pour cet utilisateur. **L'absence de
+`profile_id` ne doit jamais servir de représentation normale du profil `generic`** — un profil non
+transmis ne peut pas être distingué d'un bug ou d'une version de module obsolète.
+
+`speakdo_user_effective_profile()` résout, dans cet ordre, le profil effectif d'un utilisateur —
+toujours une chaîne non vide :
+
+1. le profil propre à l'utilisateur (`speakdo_user_profile()`) ;
+2. à défaut, le profil par défaut du tenant (`SPEAKDO_DEFAULT_PROFILE`) ;
+3. à défaut, `generic`.
+
+`speakdo_profile_context()` enrichit ce résultat, en best-effort, avec les informations du
+catalogue tenant (`GET /profiles`) quand le profil effectif y figure : `profile_version` (tel que
+retourné par le catalogue), `profile_scope` (`full` si tous les modules Dolibarr requis par ce
+profil sont activés, `restricted` sinon) et `profile_missing_modules` (les modules requis
+manquants). Si le middleware est injoignable, ou si le profil effectif n'apparaît plus dans le
+catalogue, seul `profile_id` est renvoyé — jamais de version/scope devinés.
+
+`GET /v1/users/{user_id}/capabilities` (`Speakdo::userCapabilities()`), l'endpoint que le
+middleware interroge pour authentifier une session MCP (`McpAuthService::authenticate()`),
+expose ce contexte : `profile_id` (toujours présent), et `profile_version`/`profile_scope`/
+`profile_missing_modules` quand résolubles. Avant ce correctif, cet endpoint ne renvoyait aucun de
+ces champs : un utilisateur avec un profil `receptionist` assigné dans Dolibarr recevait malgré
+tout le catalogue complet côté MCP (repli silencieux sur `generic` côté middleware, faute de
+`profile_id`).
+
+**Dette de sécurité documentée (non corrigée dans ce correctif) :** le repli du middleware vers
+`generic` lorsque `profile_id` est absent est un comportement *fail-open* — une absence
+inattendue de profil sur un flux authentifié élargit les capacités au lieu de les réduire. Ce
+correctif garantit que `profile_id` est désormais toujours envoyé, ce qui élimine la cause connue
+de ce repli, mais ne modifie pas le comportement de repli lui-même côté middleware (compatibilité
+historique). Une évolution future devrait distinguer explicitement `profile_id = "generic"` d'un
+`profile_id` absent ou malformé, et faire tendre ce dernier cas vers un comportement fail-closed
+plutôt que vers davantage de capacités.
+
 ## Limites actuelles
 
 - l’approbation différée d’un téléphone enrôlé par un administrateur pour un tiers n’est pas encore implémentée ;

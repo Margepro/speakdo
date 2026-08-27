@@ -55,6 +55,7 @@ class modSpeakdo extends DolibarrModules
             5 => array('SPEAKDO_SLUG', 'chaine', '', 'SpeakDo tenant slug (auto-generated from company name if blank)', 0, 'current', 1),
             6 => array('SPEAKDO_DISPLAY_NAME', 'chaine', '', 'SpeakDo tenant display name (auto-generated from company name if blank)', 0, 'current', 1),
             7 => array('SPEAKDO_TENANT_BOOTSTRAP_MODE', 'chaine', 'auto', 'Tenant bootstrap protocol: auto (v2, fallback to legacy only if v2 is unsupported), v2 (never fallback) or legacy (old admin-token flow only)', 0, 'current', 1),
+            8 => array('SPEAKDO_DEFAULT_PROFILE', 'chaine', '', 'Tenant default SpeakDo profile identifier for users with no explicit assignment (blank = middleware default)', 0, 'current', 1),
         );
 
         $this->tabs = array(
@@ -130,6 +131,32 @@ class modSpeakdo extends DolibarrModules
             0,
             0,
             '0',
+            '',
+            0,
+            '',
+            '-1',
+            '',
+            '',
+            '',
+            'speakdo@speakdo'
+        );
+        // Per-user SpeakDo business profile identifier (e.g. 'project_manager'). A preference,
+        // never a right — see speakdo_set_user_profile(). Free varchar, not a 'select', because
+        // this module has no catalog of real profile ids to build a select from yet (no
+        // GET /api/v1/profiles-equivalent middleware contract exists here); an empty value means
+        // "inherit the tenant default" (SPEAKDO_DEFAULT_PROFILE), itself falling back to the
+        // middleware's own 'generic'. Hidden from generic extrafields forms (list = '-1'): the
+        // SpeakDo user tab and admin/personalization.php render it themselves.
+        $extrafields->addExtraField(
+            'speakdo_profile',
+            'SpeakDoProfileExtrafield',
+            'varchar',
+            101,
+            '190',
+            'user',
+            0,
+            0,
+            '',
             '',
             0,
             '',
