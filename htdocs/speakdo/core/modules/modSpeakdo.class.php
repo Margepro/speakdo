@@ -34,7 +34,7 @@ class modSpeakdo extends DolibarrModules
 		$this->editor_name = 'MargePro';
 		$this->editor_url = 'https://speakdo.fr';
         
-        $this->version = '1.0.0';
+        $this->version = '1.0.4';
         $this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
         $this->picto = 'mobile-alt';
         $this->module_parts = array('api' => 1);
